@@ -35,9 +35,12 @@ class Unparser:
         self.f = file
         self.future_imports = []
         self._indent = 0
+        # dict of locals used to determine if variable already exists in assignments
+        self._locals = ["FLAMEGPU"]
         self.dispatch(tree)
         print("", file=self.f)
         self.f.flush()
+
 
     def fill(self, text = ""):
         "Indent a piece of text, according to the current indentation level"
@@ -48,13 +51,14 @@ class Unparser:
         self.f.write(six.text_type(text))
 
     def enter(self):
-        "Print ':', and increase the indentation."
-        self.write(":")
+        "Print '{', and increase the indentation."
+        self.write("{")
         self._indent += 1
 
     def leave(self):
-        "Decrease the indentation level."
+        "Decrease the indentation level and Print '}'"
         self._indent -= 1
+        self.fill("}")
 
     def dispatch(self, tree):
         "Dispatcher function, dispatching tree type T to method _T."
@@ -64,7 +68,44 @@ class Unparser:
             return
         meth = getattr(self, "_"+tree.__class__.__name__)
         meth(tree)
+        
+    def RaiseWarning(self, tree, str):
+        print(f"Warning ({tree.lineno}, {tree.col_offset}): {str}")
+        
+    def RaiseError(self, tree, str):
+        print(f"Error ({tree.lineno}, {tree.col_offset}): {str}")
 
+
+    ### Validation of format functions
+    
+    def dispatchFGPUFunctionArgs(self, tree):
+        if len(tree.args) is not 2:
+            self.RaiseError("Expected two FLAME GPU function arguments (input message and output message)")
+        MessageTypes = ["MessageNone", "MessageBruteForce"]
+        # input message
+        if not tree.args[0].annotation:
+            self.RaiseError(tree.args[0], "Message input requires a supported type annotation")
+        if tree.args[0].annotation.id not in MessageTypes:
+            self.RaiseError(tree.args[0], "Message input type annotation not a supported message type")
+        self._input_message_var = tree.args[0].arg  # store the message input variable name
+        self.dispatch(tree.args[0].annotation)
+        self.write(", ")
+        # output message
+        if not tree.args[1].annotation:
+            self.RaiseError(tree.args[1], "Message output requires a supported type annotation")
+        if tree.args[1].annotation.id not in MessageTypes:
+            self.RaiseError(tree.args[1], "Message output type annotation not a supported message type")
+        self._output_message_var = tree.args[1].arg  # store the message output variable name
+        self.dispatch(tree.args[1].annotation)
+    
+    # argument
+    def _FGPU2arg(self, t):
+        self.write(t.arg)
+        if t.annotation:
+            self.write(": ")
+            self.dispatch(t.annotation)    
+    
+       
 
     ############### Unparsing methods ######################
     # There should be one method per concrete grammar type #
@@ -88,6 +129,7 @@ class Unparser:
     def _Expr(self, tree):
         self.fill()
         self.dispatch(tree.value)
+        self.write(";")
 
     def _NamedExpr(self, tree):
         self.write("(")
@@ -114,10 +156,17 @@ class Unparser:
 
     def _Assign(self, t):
         self.fill()
-        for target in t.targets:
-            self.dispatch(target)
-            self.write(" = ")
+        if len(t.targets) > 1:
+            self.RaiseError(t, "Assignment to multiple targets not supported")
+        # check if target exists in locals
+        if t.targets[0].id not in self._locals :
+            self.write("auto ")
+            self._locals.append(t.targets[0].id)
+            print(self._locals)
+        self.dispatch(t.targets[0])
+        self.write(" = ")
         self.dispatch(t.value)
+        self.write(";")
 
     def _AugAssign(self, t):
         self.fill()
@@ -143,6 +192,7 @@ class Unparser:
         if t.value:
             self.write(" ")
             self.dispatch(t.value)
+        self.write(";")
 
     def _Pass(self, t):
         self.fill("pass")
@@ -344,26 +394,22 @@ class Unparser:
         self.leave()
 
     def _FunctionDef(self, t):
-        self.__FunctionDef_helper(t, "def")
-
-    def _AsyncFunctionDef(self, t):
-        self.__FunctionDef_helper(t, "async def")
-
-    def __FunctionDef_helper(self, t, fill_suffix):
         self.write("\n")
+        # reject decorators
         for deco in t.decorator_list:
-            self.fill("@")
-            self.dispatch(deco)
-        def_str = fill_suffix+" "+t.name + "("
+            self.RaiseWarning(t, f"Function decorator '{deco} not supported")
+        def_str = f"FLAMEGPU_AGENT_FUNCTION({t.name}, "
         self.fill(def_str)
-        self.dispatch(t.args)
+        self.dispatchFGPUFunctionArgs(t.args)
         self.write(")")
         if getattr(t, "returns", False):
-            self.write(" -> ")
-            self.dispatch(t.returns)
+            self.RaiseWarning(t, "Function returns statement not supported")
         self.enter()
         self.dispatch(t.body)
         self.leave()
+
+    def _AsyncFunctionDef(self, t):
+        self.RaiseError(t, "Async function snot supported")
 
     def _For(self, t):
         self.__For_helper("for ", t)
@@ -703,15 +749,49 @@ class Unparser:
         interleave(lambda: self.write(s), self.dispatch, t.values)
         self.write(")")
 
+    fgpufuncs = {"getID": "getID", "getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
+    fgpuattrs = ["ALIVE", "DEAD"]
+    input_msg_funcs = {"getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
+    output_msg_funcs = {"setVariableFloat": "setVariable<float>", "setVariableInt": "setVariable<int>"}
+            
     def _Attribute(self,t):
-        self.dispatch(t.value)
-        # Special case: 3.__abs__() is a syntax error, so if t.value
-        # is an integer literal then we need to either parenthesize
-        # it or add an extra space to get 3 .__abs__().
-        if isinstance(t.value, getattr(ast, 'Constant', getattr(ast, 'Num', None))) and isinstance(t.value.n, int):
-            self.write(" ")
-        self.write(".")
-        self.write(t.attr)
+        # Only a limited set of globals supported
+        func_dict = None
+        # FLAMEGPU singleton
+        if t.value.id == "FLAMEGPU":
+            # check for legit FGPU function calls 
+            if t.attr in self.fgpufuncs.keys():
+                # proceed
+                self.dispatch(t.value)
+                self.write("FLAMEGPU->")
+                self.write(self.fgpufuncs[t.attr])
+            elif t.attr in self.fgpuattrs:
+                # proceed
+                self.write("FLAMEGPU::")
+                self.write(t.attr)
+            else:
+                self.RaiseError(t, f"Function or attribute'{t.attr}' does not exist in FLAMEGPU object")
+            
+        # message input arg
+        elif t.value.id == self._input_message_var:
+            # check for legit FGPU function calls and translate
+            if t.attr in self.input_msg_funcs.keys():     
+                # proceed
+                self.write("FLAMEGPU->message_out.")
+                self.write(self.input_msg_funcs[t.attr])
+            else:
+                self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._input_message_var}' message input object")
+        # message output arg
+        elif t.value.id == self._output_message_var:
+            # check for legit FGPU function calls and translate
+            if t.attr in self.output_msg_funcs.keys(): 
+                # proceed
+                self.write("FLAMEGPU->message_in.")
+                self.write(self.output_msg_funcs[t.attr])
+            else:
+                self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
+        else:
+            self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported.")
 
     def _Call(self, t):
         self.dispatch(t.func)
