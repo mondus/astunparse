@@ -162,7 +162,6 @@ class Unparser:
         if t.targets[0].id not in self._locals :
             self.write("auto ")
             self._locals.append(t.targets[0].id)
-            print(self._locals)
         self.dispatch(t.targets[0])
         self.write(" = ")
         self.dispatch(t.value)
@@ -578,6 +577,8 @@ class Unparser:
         if isinstance(value, (float, complex)):
             # Substitute overflowing decimal literal for AST infinities.
             self.write(repr(value).replace("inf", INFSTR))
+        elif isinstance(value, str):
+            self.write(f"\"{value}\"")
         else:
             self.write(repr(value))
 
