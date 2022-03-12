@@ -37,6 +37,8 @@ class Unparser:
         self._indent = 0
         # dict of locals used to determine if variable already exists in assignments
         self._locals = ["FLAMEGPU"]
+        self._device_functions = [] # not actually checked anyf unction call is allowed for now
+        self._message_iterator_var = None;
         self.dispatch(tree)
         print("", file=self.f)
         self.f.flush()
@@ -97,6 +99,35 @@ class Unparser:
             self.RaiseError(tree.args[1], "Message output type annotation not a supported message type")
         self._output_message_var = tree.args[1].arg  # store the message output variable name
         self.dispatch(tree.args[1].annotation)
+        
+    def dispatchFGPUDeviceFunctionArgs(self, tree):
+        # input message
+        supported_arg_types = ['float', 'int'] # https://pypi.org/project/PyGLM/ ??? perhaps numpy int types?
+        first = True
+        for arg in tree.args:
+            # ensure that there is a type annotation
+            if not arg.annotation:
+                self.RaiseError(tree.args[0], "Device function argument requires type annotation")
+            if arg.annotation.id not in supported_arg_types:
+                self.RaiseError(tree.args[0], "Device function argument annotation type not a supported type")
+            # comma if not first
+            if not first:
+                self.write(", ")
+            self.dispatch(tree.args[0].annotation)
+            self.write(f" {tree.args[0].arg}")   
+            first = False    
+    
+    def dispatchMessageLoop(self, tree):
+        self.fill("for (const auto& ")
+        self.dispatch(tree.target)
+        self.write(" : FLAMEGPU->")
+        self.dispatch(tree.iter)
+        self.write(")")
+        self._message_iterator_var = tree.target.id
+        self.enter()
+        self.dispatch(tree.body)
+        self.leave()
+        self._message_iterator_var = None
     
     # argument
     def _FGPU2arg(self, t):
@@ -172,19 +203,10 @@ class Unparser:
         self.dispatch(t.target)
         self.write(" "+self.binop[t.op.__class__.__name__]+"= ")
         self.dispatch(t.value)
+        self.write(";")
 
     def _AnnAssign(self, t):
-        self.fill()
-        if not t.simple and isinstance(t.target, ast.Name):
-            self.write('(')
-        self.dispatch(t.target)
-        if not t.simple and isinstance(t.target, ast.Name):
-            self.write(')')
-        self.write(": ")
-        self.dispatch(t.annotation)
-        if t.value:
-            self.write(" = ")
-            self.dispatch(t.value)
+        self.RaiseError(t, "Annotated Assignment not supported")
 
     def _Return(self, t):
         self.fill("return")
@@ -194,13 +216,13 @@ class Unparser:
         self.write(";")
 
     def _Pass(self, t):
-        self.fill("pass")
+        self.fill("pass;")
 
     def _Break(self, t):
-        self.fill("break")
+        self.fill("break;")
 
     def _Continue(self, t):
-        self.fill("continue")
+        self.fill("continue;")
 
     def _Delete(self, t):
         self.fill("del ")
@@ -395,14 +417,22 @@ class Unparser:
     def _FunctionDef(self, t):
         self.write("\n")
         # reject decorators
-        for deco in t.decorator_list:
-            self.RaiseWarning(t, f"Function decorator '{deco} not supported")
-        def_str = f"FLAMEGPU_AGENT_FUNCTION({t.name}, "
-        self.fill(def_str)
-        self.dispatchFGPUFunctionArgs(t.args)
-        self.write(")")
+        if len(t.decorator_list) is not 1:
+            self.RaiseError(t, "Function definitions require a single FLAMEGPU decorator of either 'flamegpu_agent_function' or 'flamegpu_device_function'")
+        if t.decorator_list[0].id == 'flamegpu_agent_function' :
+            self.fill(f"FLAMEGPU_AGENT_FUNCTION({t.name}, ")
+            self.dispatchFGPUFunctionArgs(t.args)
+            self.write(")")
+        elif t.decorator_list[0].id == 'flamegpu_device_function' :
+            self.fill(f"FLAMEGPU_DEVICE_FUNCTION {t.name}(")
+            self.dispatchFGPUDeviceFunctionArgs(t.args)
+            self.write(")")
+            # add to list of supported functions that can be called
+            self._device_functions.append(t.name)
+        else:
+            self.RaiseError(t, "Functions= definition uses an unsupported decorator. Must use either 'flamegpu_agent_function' or 'flamegpu_device_function'")
         if getattr(t, "returns", False):
-            self.RaiseWarning(t, "Function returns statement not supported")
+            self.RaiseWarning(t, "Function definition return types not supported")
         self.enter()
         self.dispatch(t.body)
         self.leave()
@@ -411,24 +441,34 @@ class Unparser:
         self.RaiseError(t, "Async function snot supported")
 
     def _For(self, t):
-        self.__For_helper("for ", t)
+        # if message loop then process differently
+        if isinstance(t.iter, ast.Name):
+            if t.iter.id == "message_in":
+                self.dispatchMessageLoop(t)
+                return
+        
+        # allow calls but only to range function
+        if isinstance(t.iter, ast.Call):
+            if t.iter.func.id == "range":
+                # switch on different uses of range based on number of arguments
+                if len(t.iter.args) == 1:
+                    self.fill(f"for (int {t.target.id}=0;i<{t.iter.args[0].value};i++)")
+                elif len(t.iter.args) == 2:
+                    self.fill(f"for (int {t.target.id}={t.iter.args[0].value};i<{t.iter.args[1].value};i++)")
+                elif len(t.iter.args) == 3:
+                    self.fill(f"for (int {t.target.id}={t.iter.args[0].value};i<{t.iter.args[1].value};i+={t.iter.args[2].value})")
+                else:
+                    self.RaiseError(t, "Range based for loops requires use of 'range' function with arguments and not keywords")
+                self.enter()
+                self.dispatch(t.body)
+                self.leave()
+                return;
+        
+        # fail
+        self.RaiseError(t, "Range based for loops only support message iteration or use of 'range'")
 
     def _AsyncFor(self, t):
-        self.__For_helper("async for ", t)
-
-    def __For_helper(self, fill, t):
-        self.fill(fill)
-        self.dispatch(t.target)
-        self.write(" in ")
-        self.dispatch(t.iter)
-        self.enter()
-        self.dispatch(t.body)
-        self.leave()
-        if t.orelse:
-            self.fill("else")
-            self.enter()
-            self.dispatch(t.orelse)
-            self.leave()
+        self.RaiseError(t, "Async for not supported")   
 
     def _If(self, t):
         self.fill("if ")
@@ -440,7 +480,7 @@ class Unparser:
         while (t.orelse and len(t.orelse) == 1 and
                isinstance(t.orelse[0], ast.If)):
             t = t.orelse[0]
-            self.fill("elif ")
+            self.fill("else if ")
             self.dispatch(t.test)
             self.enter()
             self.dispatch(t.body)
@@ -727,14 +767,33 @@ class Unparser:
                     "LShift":"<<", "RShift":">>", "BitOr":"|", "BitXor":"^", "BitAnd":"&",
                     "FloorDiv":"//", "Pow": "**"}
     def _BinOp(self, t):
-        self.write("(")
-        self.dispatch(t.left)
-        self.write(" " + self.binop[t.op.__class__.__name__] + " ")
-        self.dispatch(t.right)
-        self.write(")")
+
+        op_name = t.op.__class__.__name__
+        # translate pow into function call (no float version)
+        if op_name == "Pow":
+            self.write("pow(")
+            self.dispatch(t.left)
+            self.write(", ")
+            self.dispatch(t.right)
+            self.write(")")
+        # translate floor div into function call (no float version)
+        elif op_name == "FloorDiv":
+            self.write("floor(")
+            self.dispatch(t.left)
+            self.write("/")
+            self.dispatch(t.right)
+            self.write(")")
+        elif op_name == "MatMult":
+            self.RaiseError(t, "Matrix multiplier operator not supported")
+        else:
+            self.write("(")
+            self.dispatch(t.left)
+            self.write(" " + self.binop[op_name] + " ")
+            self.dispatch(t.right)
+            self.write(")")
 
     cmpops = {"Eq":"==", "NotEq":"!=", "Lt":"<", "LtE":"<=", "Gt":">", "GtE":">=",
-                        "Is":"is", "IsNot":"is not", "In":"in", "NotIn":"not in"}
+                        "Is":"==", "IsNot":"!=", "In":"in", "NotIn":"not in"}
     def _Compare(self, t):
         self.write("(")
         self.dispatch(t.left)
@@ -774,14 +833,16 @@ class Unparser:
                 self.RaiseError(t, f"Function or attribute'{t.attr}' does not exist in FLAMEGPU object")
             
         # message input arg
-        elif t.value.id == self._input_message_var:
-            # check for legit FGPU function calls and translate
-            if t.attr in self.input_msg_funcs.keys():     
-                # proceed
-                self.write("FLAMEGPU->message_out.")
-                self.write(self.input_msg_funcs[t.attr])
-            else:
-                self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._input_message_var}' message input object")
+        elif self._message_iterator_var:
+            if t.value.id == self._message_iterator_var:
+                # check for legit FGPU function calls and translate
+                if t.attr in self.input_msg_funcs.keys():     
+                    # proceed
+                    self.write(f"{self._message_iterator_var}.")
+                    self.write(self.input_msg_funcs[t.attr])
+                else:
+                    self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
+                    
         # message output arg
         elif t.value.id == self._output_message_var:
             # check for legit FGPU function calls and translate
@@ -791,6 +852,7 @@ class Unparser:
                 self.write(self.output_msg_funcs[t.attr])
             else:
                 self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
+        
         else:
             self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported.")
 
@@ -802,21 +864,13 @@ class Unparser:
             if comma: self.write(", ")
             else: comma = True
             self.dispatch(e)
-        for e in t.keywords:
-            if comma: self.write(", ")
-            else: comma = True
-            self.dispatch(e)
+        if len(t.keywords):
+            self.RaiseWarning(t, "Keyword argument not supported. Ignored.")
         if sys.version_info[:2] < (3, 5):
             if t.starargs:
-                if comma: self.write(", ")
-                else: comma = True
-                self.write("*")
-                self.dispatch(t.starargs)
+                self.RaiseWarning(t, "Starargs not supported. Ignored.")
             if t.kwargs:
-                if comma: self.write(", ")
-                else: comma = True
-                self.write("**")
-                self.dispatch(t.kwargs)
+                self.RaiseWarning(t, "Kwargs not supported. Ignored.")
         self.write(")")
 
     def _Subscript(self, t):
