@@ -26,7 +26,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
     elif id is not 1:
         id = 2
     else:
-        id = 99
+        id = math.sin(id)
         
     id = helper(id)
     message_out.setVariableInt("id", id)
@@ -34,7 +34,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
     
     for x in range(1, 7, 3):
         id += x
-    
+      
     for msg in message_in: 
         msg_x = msg.getVariableFloat("x");
 

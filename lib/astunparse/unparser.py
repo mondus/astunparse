@@ -875,6 +875,9 @@ class Unparser:
                 else:
                     self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
             
+            # math functions (try them in raw function call format)
+            elif t.value.id == "math":
+                self.write(t.attr)
             else:
                 self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported")
         else:
