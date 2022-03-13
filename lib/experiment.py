@@ -24,7 +24,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
     if id > 100:
         id += 8
     elif id is not 1:
-        id = 2
+        id = numpy.int16(2)
     else:
         id = math.sin(id)
         

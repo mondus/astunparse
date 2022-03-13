@@ -143,6 +143,41 @@ class Unparser:
                   "inf": "INFINITY",
                   "nan": "NAN",
                   }
+    
+    # support for most numpy types except complex numbers and float>64bit
+    numpytypes = {"byte": "signed char",
+                  "byte": "unsigned char",
+                  "short": "short",
+                  "ushort": "unsigned short",
+                  "intc": "int",
+                  "uintc": "unsigned int",
+                  "uint": "unisgned int",
+                  "longlong": "long long",
+                  "ulonglong": "unsigned long long",
+                  "half": "half",       # cuda supported
+                  "single": "float",
+                  "double": "double",
+                  "longdouble": "long double",
+                  "bool_": "bool",
+                  "bool8": "bool",
+                  # sized aliases
+                  "int_": "long",
+                  "int8": "int8_t",
+                  "int16": "int16_t",
+                  "int32": "int32_t",
+                  "int64": "int64_t",
+                  "intp": "intptr_t",
+                  "uint_": "long",
+                  "uint8": "uint8_t",
+                  "uint16": "uint16_t",
+                  "uint32": "uint32_t",
+                  "uint64": "uint64_t",
+                  "uintp": "uintptr_t",
+                  "float_": "float",
+                  "float16": "half",
+                  "float32": "float",
+                  "float64": "double"
+                  }
 
     ############### Unparsing methods ######################
     # There should be one method per concrete grammar type #
@@ -878,6 +913,12 @@ class Unparser:
             # math functions (try them in raw function call format)
             elif t.value.id == "math":
                 self.write(t.attr)
+            # numpy types
+            elif t.value.id == "numpy" or t.value.id == "np":
+                if t.attr in self.numpytypes:
+                    self.write(f"static_cast<{self.numpytypes[t.attr]}>")
+                else: 
+                    self.RaiseError(t, f"Unsupported numpy type {t.attr}")
             else:
                 self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported")
         else:
