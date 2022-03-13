@@ -19,6 +19,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
     id = FLAMEGPU.getID()
     offset = 10
     x = FLAMEGPU.getVariableFloat("x")
+    e = FLAMEGPU.environment.getPropertyFloat("e")
     id = id+offset
     if id > 100:
         id += 8

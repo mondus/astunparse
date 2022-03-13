@@ -136,7 +136,13 @@ class Unparser:
             self.write(": ")
             self.dispatch(t.annotation)    
     
-       
+    pythonbuiltins = ["abs", "float", "int"]
+                      
+    mathconsts = {"pi": "M_PI",
+                  "e": "M_E",
+                  "inf": "INFINITY",
+                  "nan": "NAN",
+                  }
 
     ############### Unparsing methods ######################
     # There should be one method per concrete grammar type #
@@ -813,50 +819,73 @@ class Unparser:
     fgpuattrs = ["ALIVE", "DEAD"]
     input_msg_funcs = {"getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
     output_msg_funcs = {"setVariableFloat": "setVariable<float>", "setVariableInt": "setVariable<int>"}
+    env_funcs = {"getPropertyFloat": "getProperty<float>", "getPropertyInt": "getProperty<int>"}
             
     def _Attribute(self,t):
         # Only a limited set of globals supported
         func_dict = None
-        # FLAMEGPU singleton
-        if t.value.id == "FLAMEGPU":
-            # check for legit FGPU function calls 
-            if t.attr in self.fgpufuncs.keys():
-                # proceed
-                self.dispatch(t.value)
-                self.write("FLAMEGPU->")
-                self.write(self.fgpufuncs[t.attr])
-            elif t.attr in self.fgpuattrs:
-                # proceed
-                self.write("FLAMEGPU::")
-                self.write(t.attr)
-            else:
-                self.RaiseError(t, f"Function or attribute'{t.attr}' does not exist in FLAMEGPU object")
-            
-        # message input arg
-        elif self._message_iterator_var:
-            if t.value.id == self._message_iterator_var:
-                # check for legit FGPU function calls and translate
-                if t.attr in self.input_msg_funcs.keys():     
+        # constant is nested attribute
+        if isinstance(t.value, ast.Attribute):
+            # only nested attribute type is environment
+            if not isinstance(t.value.value, ast.Name):
+                self.RaiseError(t, "Unknown or unsupported nested attribute")
+            if t.value.value.id == "FLAMEGPU" and t.value.attr == "environment":
+                # check it is a supported ennvironment function
+                if t.attr in self.env_funcs.keys(): 
                     # proceed
-                    self.write(f"{self._message_iterator_var}.")
-                    self.write(self.input_msg_funcs[t.attr])
-                else:
-                    self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
-                    
-        # message output arg
-        elif t.value.id == self._output_message_var:
-            # check for legit FGPU function calls and translate
-            if t.attr in self.output_msg_funcs.keys(): 
-                # proceed
-                self.write("FLAMEGPU->message_in.")
-                self.write(self.output_msg_funcs[t.attr])
+                    self.write("FLAMEGPU->environment.")
+                    self.write(self.env_funcs[t.attr])
+                else: 
+                    self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.environment object")
             else:
-                self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
-        
+                self.RaiseError(t, f"Unknown or unsupported nested attribute in {t.value.value.id}")
+        # FLAMEGPU singleton
+        elif isinstance(t.value, ast.Name):
+            if t.value.id == "FLAMEGPU":
+                # check for legit FGPU function calls 
+                if t.attr in self.fgpufuncs.keys():
+                    # proceed
+                    self.write("FLAMEGPU->")
+                    self.write(self.fgpufuncs[t.attr])
+                elif t.attr in self.fgpuattrs:
+                    # proceed
+                    self.write("FLAMEGPU::")
+                    self.write(t.attr)
+                else:
+                    self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU object")
+                
+            # message input arg
+            elif self._message_iterator_var:
+                if t.value.id == self._message_iterator_var:
+                    # check for legit FGPU function calls and translate
+                    if t.attr in self.input_msg_funcs.keys():     
+                        # proceed
+                        self.write(f"{self._message_iterator_var}.")
+                        self.write(self.input_msg_funcs[t.attr])
+                    else:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
+                        
+            # message output arg
+            elif t.value.id == self._output_message_var:
+                # check for legit FGPU function calls and translate
+                if t.attr in self.output_msg_funcs.keys(): 
+                    # proceed
+                    self.write("FLAMEGPU->message_in.")
+                    self.write(self.output_msg_funcs[t.attr])
+                else:
+                    self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
+            
+            else:
+                self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported")
         else:
-            self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported.")
+            self.RaiseError(t, "Unsupported function call syntax")
 
     def _Call(self, t):
+        # check calls but let attributes check in thier own dispatcher
+        funcs = self._device_functions + self.pythonbuiltins
+        if isinstance(t.func, ast.Name):
+            if (t.func.id not in funcs):
+                self.RaiseWarning(t, "Function call is not a defined FLAME GPU device function or a supported python built in.")
         self.dispatch(t.func)
         self.write("(")
         comma = False
