@@ -99,22 +99,41 @@ class Unparser:
             self.RaiseError(tree.args[1], "Message output type annotation not a supported message type")
         self._output_message_var = tree.args[1].arg  # store the message output variable name
         self.dispatch(tree.args[1].annotation)
-        
+    
+    def dispatchType(self, tree):
+        """
+        There is a limited set of types and formats of type description supported. Types can be either;
+        1) A python built in type of int or float, or
+        2) A subset of numpy types prefixed with either numpy or np. e.g. np.int16
+        This function translates and a catches unsupported types but does not translate a function call (i.e. cast)
+        """
+        if isinstance(tree, ast.Name):
+            if tree.id not in self.basic_arg_types:
+                self.RaiseError(arg, "Not a supported type")
+            self.write(tree.id)
+        elif isinstance(tree, ast.Attribute):
+            if not isinstance(tree.value, ast.Name) :
+                self.RaiseError(arg, "Not a supported type")
+            if not (tree.value.id == "numpy" or tree.value.id == "np"):
+                self.RaiseError(arg, "Not a supported type")
+            if tree.attr not in self.numpytypes:
+                self.RaiseError(arg, "Not a supported numpy type")
+            self.write(self.numpytypes[tree.attr])
+
+    
     def dispatchFGPUDeviceFunctionArgs(self, tree):
         # input message
-        supported_arg_types = ['float', 'int'] # https://pypi.org/project/PyGLM/ ??? perhaps numpy int types?
         first = True
+        annotation = None
         for arg in tree.args:
             # ensure that there is a type annotation
             if not arg.annotation:
-                self.RaiseError(tree.args[0], "Device function argument requires type annotation")
-            if arg.annotation.id not in supported_arg_types:
-                self.RaiseError(tree.args[0], "Device function argument annotation type not a supported type")
+                self.RaiseError(arg, "Device function argument requires type annotation")
             # comma if not first
             if not first:
                 self.write(", ")
-            self.dispatch(tree.args[0].annotation)
-            self.write(f" {tree.args[0].arg}")   
+            self.dispatchType(arg.annotation)
+            self.write(f" {arg.arg}")   
             first = False    
     
     def dispatchMessageLoop(self, tree):
@@ -136,8 +155,13 @@ class Unparser:
             self.write(": ")
             self.dispatch(t.annotation)    
     
+    # represents built in functions
     pythonbuiltins = ["abs", "float", "int"]
-                      
+    
+    # basic types
+    basic_arg_types = ['float', 'int']
+    
+    # supported math constansts    
     mathconsts = {"pi": "M_PI",
                   "e": "M_E",
                   "inf": "INFINITY",
@@ -199,37 +223,40 @@ class Unparser:
 
     # stmt
     def _Expr(self, tree):
+        """
+        Same as a standard python expression but ends with semicolon
+        """
         self.fill()
         self.dispatch(tree.value)
         self.write(";")
 
     def _NamedExpr(self, tree):
+        """
+        No such concept in C++. Standard assignment can be used in any location.
+        """
         self.write("(")
         self.dispatch(tree.target)
-        self.write(" := ")
+        self.write(" = ")
         self.dispatch(tree.value)
         self.write(")")
 
     def _Import(self, t):
-        self.fill("import ")
-        interleave(lambda: self.write(", "), self.dispatch, t.names)
+        self.RaiseError(t, "Importing of modules not supported")
 
     def _ImportFrom(self, t):
-        # A from __future__ import may affect unparsing, so record it.
-        if t.module and t.module == '__future__':
-            self.future_imports.extend(n.name for n in t.names)
-
-        self.fill("from ")
-        self.write("." * t.level)
-        if t.module:
-            self.write(t.module)
-        self.write(" import ")
-        interleave(lambda: self.write(", "), self.dispatch, t.names)
+        self.RaiseError(t, "Importing of modules not supported")
 
     def _Assign(self, t):
-        self.fill()
+        """
+        Assignment will use the auto type to define a variable at first use else will perform standard assignment.
+        Note: There is no ability to create `const` variables unless this is inferred from the assignment expression.
+        Multiple assignment is supported by cpp but not in the translator neither is assignment to complex expressions which are valid python syntax.
+        """
         if len(t.targets) > 1:
             self.RaiseError(t, "Assignment to multiple targets not supported")
+        if not isinstance(t.targets[0], ast.Name):
+            self.RaiseError(t, "Assignment to complex expressions not supported")
+        self.fill()
         # check if target exists in locals
         if t.targets[0].id not in self._locals :
             self.write("auto ")
@@ -240,6 +267,15 @@ class Unparser:
         self.write(";")
 
     def _AugAssign(self, t):
+        """
+        Similar to assignment in terms of restrictions. E.g. Allow only single named variable assignments.
+        Also requires the named variable to already exist in scope.
+        """
+        if not isinstance(t.target, ast.Name):
+            self.RaiseError(t, "Augmented assignment to complex expressions not supported")
+        # check if target exists in locals
+        if t.target.id not in self._locals :
+            self.RaiseError(t, "Augmented assignment not permitted on variables not already assigned previously")
         self.fill()
         self.dispatch(t.target)
         self.write(" "+self.binop[t.op.__class__.__name__]+"= ")
@@ -250,6 +286,9 @@ class Unparser:
         self.RaiseError(t, "Annotated Assignment not supported")
 
     def _Return(self, t):
+        """
+        Standard cpp like return with semicolon.
+        """
         self.fill("return")
         if t.value:
             self.write(" ")
@@ -266,214 +305,90 @@ class Unparser:
         self.fill("continue;")
 
     def _Delete(self, t):
-        self.fill("del ")
-        interleave(lambda: self.write(", "), self.dispatch, t.targets)
+        self.RaiseError(t, "Deletion not supported")
 
     def _Assert(self, t):
-        self.fill("assert ")
-        self.dispatch(t.test)
-        if t.msg:
-            self.write(", ")
-            self.dispatch(t.msg)
+        """
+        cassert does exist but probably not required in FGPU functions and unclear if supported by jitfy
+        """
+        self.RaiseError(t, "Assert not supported")
 
     def _Exec(self, t):
-        self.fill("exec ")
-        self.dispatch(t.body)
-        if t.globals:
-            self.write(" in ")
-            self.dispatch(t.globals)
-        if t.locals:
-            self.write(", ")
-            self.dispatch(t.locals)
+        self.RaiseError(t, "Exec not supported")
 
     def _Print(self, t):
-        self.fill("print ")
-        do_comma = False
-        if t.dest:
-            self.write(">>")
-            self.dispatch(t.dest)
-            do_comma = True
-        for e in t.values:
-            if do_comma:self.write(", ")
-            else:do_comma=True
-            self.dispatch(e)
-        if not t.nl:
-            self.write(",")
-
+        """
+        This is old school python printing so no need to support
+        """
+        self.RaiseError(t, "Print not supported")
+        
     def _Global(self, t):
-        self.fill("global ")
-        interleave(lambda: self.write(", "), self.write, t.names)
+        self.RaiseError(t, "Use of 'global' not supported")
 
     def _Nonlocal(self, t):
-        self.fill("nonlocal ")
-        interleave(lambda: self.write(", "), self.write, t.names)
+        self.RaiseError(t, "Use of 'nonlocal' not supported")
 
     def _Await(self, t):
-        self.write("(")
-        self.write("await")
-        if t.value:
-            self.write(" ")
-            self.dispatch(t.value)
-        self.write(")")
+        self.RaiseError(t, "Await not supported")
 
     def _Yield(self, t):
-        self.write("(")
-        self.write("yield")
-        if t.value:
-            self.write(" ")
-            self.dispatch(t.value)
-        self.write(")")
+        self.RaiseError(t, "Yield not supported")
 
     def _YieldFrom(self, t):
-        self.write("(")
-        self.write("yield from")
-        if t.value:
-            self.write(" ")
-            self.dispatch(t.value)
-        self.write(")")
+        self.RaiseError(t, "Yield from not supported")
 
     def _Raise(self, t):
-        self.fill("raise")
-        if six.PY3:
-            if not t.exc:
-                assert not t.cause
-                return
-            self.write(" ")
-            self.dispatch(t.exc)
-            if t.cause:
-                self.write(" from ")
-                self.dispatch(t.cause)
-        else:
-            self.write(" ")
-            if t.type:
-                self.dispatch(t.type)
-            if t.inst:
-                self.write(", ")
-                self.dispatch(t.inst)
-            if t.tback:
-                self.write(", ")
-                self.dispatch(t.tback)
+        """
+        Exceptions are obviously supported in cpp but not in CUDA device code
+        """
+        self.RaiseError(t, "Exception raising not supported")
 
     def _Try(self, t):
-        self.fill("try")
-        self.enter()
-        self.dispatch(t.body)
-        self.leave()
-        for ex in t.handlers:
-            self.dispatch(ex)
-        if t.orelse:
-            self.fill("else")
-            self.enter()
-            self.dispatch(t.orelse)
-            self.leave()
-        if t.finalbody:
-            self.fill("finally")
-            self.enter()
-            self.dispatch(t.finalbody)
-            self.leave()
+        self.RaiseError(t, "Exceptions not supported")
 
     def _TryExcept(self, t):
-        self.fill("try")
-        self.enter()
-        self.dispatch(t.body)
-        self.leave()
-
-        for ex in t.handlers:
-            self.dispatch(ex)
-        if t.orelse:
-            self.fill("else")
-            self.enter()
-            self.dispatch(t.orelse)
-            self.leave()
+        self.RaiseError(t, "Exceptions not supported")
 
     def _TryFinally(self, t):
-        if len(t.body) == 1 and isinstance(t.body[0], ast.TryExcept):
-            # try-except-finally
-            self.dispatch(t.body)
-        else:
-            self.fill("try")
-            self.enter()
-            self.dispatch(t.body)
-            self.leave()
-
-        self.fill("finally")
-        self.enter()
-        self.dispatch(t.finalbody)
-        self.leave()
+        self.RaiseError(t, "Exceptions not supported")
 
     def _ExceptHandler(self, t):
-        self.fill("except")
-        if t.type:
-            self.write(" ")
-            self.dispatch(t.type)
-        if t.name:
-            self.write(" as ")
-            if six.PY3:
-                self.write(t.name)
-            else:
-                self.dispatch(t.name)
-        self.enter()
-        self.dispatch(t.body)
-        self.leave()
+        self.RaiseError(t, "Exceptions not supported")
 
     def _ClassDef(self, t):
-        self.write("\n")
-        for deco in t.decorator_list:
-            self.fill("@")
-            self.dispatch(deco)
-        self.fill("class "+t.name)
-        if six.PY3:
-            self.write("(")
-            comma = False
-            for e in t.bases:
-                if comma: self.write(", ")
-                else: comma = True
-                self.dispatch(e)
-            for e in t.keywords:
-                if comma: self.write(", ")
-                else: comma = True
-                self.dispatch(e)
-            if sys.version_info[:2] < (3, 5):
-                if t.starargs:
-                    if comma: self.write(", ")
-                    else: comma = True
-                    self.write("*")
-                    self.dispatch(t.starargs)
-                if t.kwargs:
-                    if comma: self.write(", ")
-                    else: comma = True
-                    self.write("**")
-                    self.dispatch(t.kwargs)
-            self.write(")")
-        elif t.bases:
-                self.write("(")
-                for a in t.bases:
-                    self.dispatch(a)
-                    self.write(", ")
-                self.write(")")
-        self.enter()
-        self.dispatch(t.body)
-        self.leave()
+        self.RaiseError(t, "Class definitions not supported")
 
     def _FunctionDef(self, t):
+        """
+        Checks the decorators of the function definition much must be either 'flamegpu_agent_function' or 'flamegpu_device_function'.
+        Each is then processed in a different way using a specific dispatcher.
+        Function calls are actually checked and only permitted (or user defined) function calls are supported.
+        """
         self.write("\n")
-        # reject decorators
-        if len(t.decorator_list) is not 1:
-            self.RaiseError(t, "Function definitions require a single FLAMEGPU decorator of either 'flamegpu_agent_function' or 'flamegpu_device_function'")
+        # check decorators
+        if len(t.decorator_list) is not 1 or not isinstance(t.decorator_list[0], ast.Name):
+            self.RaiseError(t, "Function definitions require a single FLAMEGPU decorator of either 'flamegpu_agent_function' or 'flamegpu_device_function'")       
+        # FLAMEGPU_AGENT_FUNCTION
         if t.decorator_list[0].id == 'flamegpu_agent_function' :
+            if getattr(t, "returns", False):
+                self.RaiseWarning(t, "Function definition return type not supported on 'flamegpu_agent_function'")
             self.fill(f"FLAMEGPU_AGENT_FUNCTION({t.name}, ")
             self.dispatchFGPUFunctionArgs(t.args)
             self.write(")")
+        # FLAMEGPU_DEVICE_FUNCTION
         elif t.decorator_list[0].id == 'flamegpu_device_function' :
-            self.fill(f"FLAMEGPU_DEVICE_FUNCTION {t.name}(")
+            self.fill(f"FLAMEGPU_DEVICE_FUNCTION ")
+            if t.returns:
+                self.dispatchType(t.returns)
+            else:
+                self.write("void")
+            self.write(f" {t.name}(")
             self.dispatchFGPUDeviceFunctionArgs(t.args)
             self.write(")")
-            # add to list of supported functions that can be called
+            # add to list of defined functions that can be called
             self._device_functions.append(t.name)
         else:
             self.RaiseError(t, "Functions= definition uses an unsupported decorator. Must use either 'flamegpu_agent_function' or 'flamegpu_device_function'")
-        if getattr(t, "returns", False):
-            self.RaiseWarning(t, "Function definition return types not supported")
         self.enter()
         self.dispatch(t.body)
         self.leave()
@@ -482,36 +397,65 @@ class Unparser:
         self.RaiseError(t, "Async function snot supported")
 
     def _For(self, t):
+        """
+        Two type for for loop are supported. Either;
+        1) Message for loop in which case the format requires a iterator using the named FLAMEGPU function argument of 'message_in'
+        2) A range based for loop with 1 to 3 arguments which is converted into a c style loop
+        """
         # if message loop then process differently
         if isinstance(t.iter, ast.Name):
             if t.iter.id == "message_in":
                 self.dispatchMessageLoop(t)
-                return
-        
+            else:
+                self.RaiseError(t, "Range based for loops only support message iteration using 'message_in' iterator")
         # allow calls but only to range function
-        if isinstance(t.iter, ast.Call):
-            if t.iter.func.id == "range":
-                # switch on different uses of range based on number of arguments
-                if len(t.iter.args) == 1:
-                    self.fill(f"for (int {t.target.id}=0;i<{t.iter.args[0].value};i++)")
-                elif len(t.iter.args) == 2:
-                    self.fill(f"for (int {t.target.id}={t.iter.args[0].value};i<{t.iter.args[1].value};i++)")
-                elif len(t.iter.args) == 3:
-                    self.fill(f"for (int {t.target.id}={t.iter.args[0].value};i<{t.iter.args[1].value};i+={t.iter.args[2].value})")
+        elif isinstance(t.iter, ast.Call):
+            if isinstance(t.iter.func, ast.Name):
+                if t.iter.func.id == "range":
+                    # switch on different uses of range based on number of arguments
+                    if len(t.iter.args) == 1:
+                        self.fill(f"for (int ")
+                        self.dispatch(t.target)
+                        self.write("=0;i<")
+                        self.dispatch(t.iter.args[0])
+                        self.write(";i++)")
+                    elif len(t.iter.args) == 2:
+                        self.fill(f"for (int ")
+                        self.dispatch(t.target)
+                        self.write("=")
+                        self.dispatch(t.iter.args[0])
+                        seld.write(";i<")
+                        self.dispatch(t.iter.args[1])
+                        self.write(";i++)")
+                    elif len(t.iter.args) == 3:
+                        self.fill(f"for (int ")
+                        self.dispatch(t.target)
+                        self.write("=")
+                        self.dispatch(t.iter.args[0])
+                        seld.write(";i<")
+                        self.dispatch(t.iter.args[1])
+                        self.write(";i+=")
+                        self.dispatch(t.iter.args[2])
+                        self.write(")")
+                    else:
+                        self.RaiseError(t, "Range based for loops requires use of 'range' function with arguments and not keywords")
+                    self.enter()
+                    self.dispatch(t.body)
+                    self.leave()
                 else:
-                    self.RaiseError(t, "Range based for loops requires use of 'range' function with arguments and not keywords")
-                self.enter()
-                self.dispatch(t.body)
-                self.leave()
-                return;
-        
-        # fail
-        self.RaiseError(t, "Range based for loops only support message iteration or use of 'range'")
+                    self.RaiseError(t, "Range based for loops only support calls to the 'range' function")
+            else:
+                self.RaiseError(t, "Range based for loops only support message iteration or use of 'range'")
+        else:
+            self.RaiseError(t, "Range based for loops only support message iteration or use of 'range'")
 
     def _AsyncFor(self, t):
         self.RaiseError(t, "Async for not supported")   
 
     def _If(self, t):
+        """
+        Fairly straightforward translation to if, else if, else format
+        """
         self.fill("if ")
         self.dispatch(t.test)
         self.enter()
@@ -534,6 +478,9 @@ class Unparser:
             self.leave()
 
     def _While(self, t):
+        """
+        Straightforward translation to c style while loop
+        """
         self.fill("while ")
         self.dispatch(t.test)
         self.enter()
@@ -545,28 +492,15 @@ class Unparser:
             self.dispatch(t.orelse)
             self.leave()
 
-    def _generic_With(self, t, async_=False):
-        self.fill("async with " if async_ else "with ")
-        if hasattr(t, 'items'):
-            interleave(lambda: self.write(", "), self.dispatch, t.items)
-        else:
-            self.dispatch(t.context_expr)
-            if t.optional_vars:
-                self.write(" as ")
-                self.dispatch(t.optional_vars)
-        self.enter()
-        self.dispatch(t.body)
-        self.leave()
-
     def _With(self, t):
-        self._generic_With(t)
+        self.RaiseError(t, "With for not supported")
 
     def _AsyncWith(self, t):
-        self._generic_With(t, async_=True)
+        self.RaiseError(t, "Asynchronous with for not supported")
 
     # expr
     def _Bytes(self, t):
-        self.write(repr(t.s))
+        self.RaiseError(t, "Bytes function not supported")
 
     def _Str(self, tree):
         if six.PY3:
@@ -925,7 +859,7 @@ class Unparser:
             self.RaiseError(t, "Unsupported function call syntax")
 
     def _Call(self, t):
-        # check calls but let attributes check in thier own dispatcher
+        # check calls but let attributes check in their own dispatcher
         funcs = self._device_functions + self.pythonbuiltins
         if isinstance(t.func, ast.Name):
             if (t.func.id not in funcs):

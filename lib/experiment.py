@@ -11,7 +11,7 @@ def func1():
 agent_func = """
 
 @flamegpu_device_function
-def helper(x: int):
+def helper(x: numpy.int16) -> int :
     return x**2
 
 @flamegpu_agent_function
@@ -21,7 +21,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
     x = FLAMEGPU.getVariableFloat("x")
     e = FLAMEGPU.environment.getPropertyFloat("e")
     id = id+offset
-    if id > 100:
+    if id > 100+3:
         id += 8
     elif id is not 1:
         id = numpy.int16(2)
@@ -32,7 +32,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
     message_out.setVariableInt("id", id)
     message_out.setVariableFloat("x", x)
     
-    for x in range(1, 7, 3):
+    for x in range(1+6):
         id += x
       
     for msg in message_in: 
