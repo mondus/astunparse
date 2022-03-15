@@ -18,8 +18,11 @@ def helper(x: numpy.int16) -> int :
 def pred_output_location(message_in: MessageBruteForce, message_out: MessageBruteForce):
     id = FLAMEGPU.getID()
     offset = 10
-    x = FLAMEGPU.getVariableFloatArray6("x")
+    x = FLAMEGPU.getVariableFloatArray6("x", 2)
+    y = FLAMEGPU.getVariableFloat("y")
     e = FLAMEGPU.environment.getPropertyFloat("e")
+    
+    rand = FLAMEGPU.random.uniformFloat()
     id = id+offset
     if id > 100+3:
         id += 8

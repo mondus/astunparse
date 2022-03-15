@@ -74,17 +74,13 @@ class CodeGenerator:
                   }
     
     # getVariableType and setVariableType functions are added dynamically    
-    fgpu_funcs = {"getID": "getID",
-                 "getStepCounter": "getStepCounter",
-                 "getThreadIndex": "getThreadIndex"
-                 }
-                 
+    fgpu_funcs = [ "getID", "getStepCounter", "getThreadIndex" ]   
     fgpu_attrs = ["ALIVE", "DEAD"]
-    fgpu_input_msg_funcs = {"getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
-    fgpu_output_msg_funcs = {"setVariableFloat": "setVariable<float>", "setVariableInt": "setVariable<int>"}
-    fgpu_agent_out_msg_funcs = {"getID": "getID"} # + get and set typed variables
-    fgpu_env_funcs = {"getPropertyFloat": "getProperty<float>", "getPropertyInt": "getProperty<int>"}
-    fgpu_rand_funcs = {}
+    fgpu_input_msg_funcs = ["getIndex"] 
+    fgpu_output_msg_funcs = []
+    fgpu_agent_out_msg_funcs = ["getID"]
+    fgpu_env_funcs = ["containsProperty"] # TODO: Get macro property
+    fgpu_rand_funcs = []
     
     _fgpu_types = {"Float": "float",
                   "Double": "double",
@@ -109,8 +105,6 @@ class CodeGenerator:
         self.f = file
         self.future_imports = []
         self._indent = 0
-        # generate function prototypes
-        self._populateDeviceFuncTypes(self.fgpu_funcs, ["getVariable", "setVariable"], self._fgpu_types)
         # dict of locals used to determine if variable already exists in assignments
         self._locals = ["FLAMEGPU"]
         self._device_functions = [] # not actually checked any function call is allowed for now
@@ -129,31 +123,42 @@ class CodeGenerator:
                 # append to dict
                 func_dict[py_func] = cpp_func
                 
-    def _deviceVariableFunctionName(self, tree, py_func):
+    def _deviceVariableFunctionName(self, tree, py_func, permitted_prefixes, allow_lengths = True):
+        """
+        Gets the device function name by translating a typed Python version to a templated cpp version.
+        Python functions looks like getVariableFloatArray6 and translate to getVariable<float, 6>
+        This function will detect and test against a set of known types and also extract the Array length
+        This function returns None if the string is invalid in format but only throws an error if the format is correct but the type is invalid.
+        """
         cpp_func_name = ""
         # extract function name start
-        if py_func.startswith("getVariable"):
-            cpp_func_name = "getVariable"
-            py_func = py_func[len("getVariable"):]
-        elif py_func.startswith("setVariable"):
-            cpp_func_name = "setVariable"
-            py_func = py_func[len("setVariable"):]
+        for prefix in permitted_prefixes:
+            if py_func.startswith(prefix):
+                cpp_func_name = prefix
+                py_func = py_func[len(prefix):]
+                break # dont allow the else
         else:
             return None
-        
-        #split to get type and Array Length   (this could instead be looked up form the model description      
-        type_and_length = py_func.split("Array")
-        # check type
-        if type_and_length[0] not in self._fgpu_types:
-            self.RaiseError(tree, f"'{type_and_length[0]}' is not a valid FLAME GPU type")
-        # generate template args
-        if (len(type_and_length) == 1):
-            cpp_func_name += f"<{type_and_length[0]}>"
-        elif (len(type_and_length) == 2):
-            cpp_func_name += f"<{type_and_length[0]}, {type_and_length[1]}>"
+        # check type and lengths
+        if allow_lengths:
+            #split to get type and Array Length (TODO: This could instead be looked up from the model description)     
+            type_and_length = py_func.split("Array")
+            if type_and_length[0] not in self._fgpu_types:
+                self.RaiseError(tree, f"'{type_and_length[0]}' is not a valid FLAME GPU type")
+            t = self._fgpu_types[type_and_length[0]]
+            # generate template args
+            if (len(type_and_length) == 1):
+                cpp_func_name += f"<{t}>"
+            elif (len(type_and_length) == 2):
+                cpp_func_name += f"<{t}, {type_and_length[1]}>"
+            else:
+                return None
         else:
-            return None
-            
+            if py_func not in self._fgpu_types:
+                self.RaiseError(tree, f"'{py_func}' is not a valid FLAME GPU type")
+            t = self._fgpu_types[py_func]
+            cpp_func_name += f"<{t}>"
+        # return    
         return cpp_func_name
         
 
@@ -195,7 +200,7 @@ class CodeGenerator:
     ### Validation of format functions
     
     def dispatchFGPUFunctionArgs(self, tree):
-        if len(tree.args) is not 2:
+        if len(tree.args) != 2:
             self.RaiseError("Expected two FLAME GPU function arguments (input message and output message)")
         MessageTypes = ["MessageNone", "MessageBruteForce"]
         # input message
@@ -278,18 +283,47 @@ class CodeGenerator:
             # only nested attribute type is environment
             if not isinstance(t.value.value, ast.Name):
                 self.RaiseError(t, "Unknown or unsupported nested attribute")
+            # FLAMEGPU->environment
             if t.value.value.id == "FLAMEGPU" and t.value.attr == "environment":
                 # check it is a supported environment function
-                if t.attr in self.fgpu_env_funcs.keys(): 
+                self.write("FLAMEGPU->environment.")
+                if t.attr in self.fgpu_env_funcs: 
                     # proceed
-                    self.write("FLAMEGPU->environment.")
-                    self.write(self.fgpu_env_funcs[t.attr])
+                    self.write(t.attr)
                 else: 
-                    self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.environment object")
+                    # possible getter setter type function
+                    py_func = self._deviceVariableFunctionName(t, t.attr, ["getProperty"])
+                    if not py_func:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.environment object")
+                    # proceed
+                    self.write(py_func)  
+            # FLAMEGPU->random
             elif t.value.value.id == "FLAMEGPU" and t.value.attr == "random":
-                pass # TODO
+                # check it is a supported random function
+                self.write("FLAMEGPU->random.")
+                if t.attr in self.fgpu_rand_funcs: 
+                    # proceed
+                    self.write(t.attr)
+                else: 
+                    # possible getter setter type function
+                    py_func = self._deviceVariableFunctionName(t, t.attr, ["uniform", "normal", "logNormal"], allow_lengths=False)
+                    if not py_func:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.random object")
+                    # proceed
+                    self.write(py_func) 
             elif t.value.value.id == "FLAMEGPU" and t.value.attr == "agent_out":
-                pass # TODO
+                # check it is a supported agent_out function
+                self.write("FLAMEGPU->agent_out.")
+                if t.attr in self.fgpu_agent_out_msg_funcs: 
+                    # proceed
+                    self.write(t.attr)
+                else: 
+                    # possible getter setter type function
+                    py_func = self._deviceVariableFunctionName(t, t.attr, ["setVariable"])
+                    if not py_func:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.agent_out object")
+                    # proceed
+                    self.write(py_func)
             else:
                 self.RaiseError(t, f"Unknown or unsupported nested attribute in {t.value.value.id}")
         # FLAMEGPU singleton
@@ -297,12 +331,12 @@ class CodeGenerator:
             if t.value.id == "FLAMEGPU":
                 # check for legit FGPU function calls 
                 self.write("FLAMEGPU->")
-                if t.attr in self.fgpu_funcs.keys():
+                if t.attr in self.fgpu_funcs:
                     # proceed
-                    self.write(self.fgpu_funcs[t.attr])
+                    self.write(t.attr)
                 else:
                     # possible getter setter type function
-                    py_func = self._deviceVariableFunctionName(t, t.attr)
+                    py_func = self._deviceVariableFunctionName(t, t.attr, ["getVariable", "setVariable"])
                     if not py_func:
                         self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU object")
                     # proceed
@@ -311,23 +345,37 @@ class CodeGenerator:
             # message input arg
             elif self._message_iterator_var:
                 if t.value.id == self._message_iterator_var:
+                    self.write(f"{self._message_iterator_var}.")
                     # check for legit FGPU function calls and translate
-                    if t.attr in self.fgpu_input_msg_funcs.keys():     
+                    if t.attr in self.fgpu_input_msg_funcs:     
                         # proceed
-                        self.write(f"{self._message_iterator_var}.")
-                        self.write(self.fgpu_input_msg_funcs[t.attr])
+                        self.write(t.attr)
                     else:
-                        self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
+                        # possible getter setter type function
+                        py_func = self._deviceVariableFunctionName(t, t.attr, ["getVariable"])
+                        if not py_func:
+                            self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
+                        # proceed
+                        self.write(py_func)
+                        
+                        
                         
             # message output arg
             elif t.value.id == self._output_message_var:
                 # check for legit FGPU function calls and translate
-                if t.attr in self.fgpu_output_msg_funcs.keys(): 
+                self.write("FLAMEGPU->message_out.")
+                if t.attr in self.fgpu_output_msg_funcs: 
                     # proceed
-                    self.write("FLAMEGPU->message_in.")
-                    self.write(self.fgpu_output_msg_funcs[t.attr])
+                    self.write(t.attr)
                 else:
-                    self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
+                    # possible getter setter type function
+                    py_func = self._deviceVariableFunctionName(t, t.attr, ["setVariable"])
+                    if not py_func:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
+                    # proceed
+                    self.write(py_func)
+                
+                    
             
             # math functions (try them in raw function call format) or constants
             elif t.value.id == "math":
@@ -510,7 +558,7 @@ class CodeGenerator:
         """
         self.write("\n")
         # check decorators
-        if len(t.decorator_list) is not 1 or not isinstance(t.decorator_list[0], ast.Name):
+        if len(t.decorator_list) != 1 or not isinstance(t.decorator_list[0], ast.Name):
             self.RaiseError(t, "Function definitions require a single FLAMEGPU decorator of either 'flamegpu_agent_function' or 'flamegpu_device_function'")       
         # FLAMEGPU_AGENT_FUNCTION
         if t.decorator_list[0].id == 'flamegpu_agent_function' :
