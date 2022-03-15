@@ -1,7 +1,7 @@
 import ast
 import sys
 import inspect
-import astunparse
+import codegen
 import astpretty
 
 def func1():
@@ -18,7 +18,7 @@ def helper(x: numpy.int16) -> int :
 def pred_output_location(message_in: MessageBruteForce, message_out: MessageBruteForce):
     id = FLAMEGPU.getID()
     offset = 10
-    x = FLAMEGPU.getVariableFloat("x")
+    x = FLAMEGPU.getVariableFloatArray6("x")
     e = FLAMEGPU.environment.getPropertyFloat("e")
     id = id+offset
     if id > 100+3:
@@ -27,7 +27,9 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
         id = numpy.int16(2)
     else:
         id = math.sin(id)
-        
+    
+    x = 10 if id is 1 else 5
+    
     id = helper(id)
     message_out.setVariableInt("id", id)
     message_out.setVariableFloat("x", x)
@@ -44,10 +46,10 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
 # introspection to convert to raw string
 #tree = ast.parse(inspect.getsource(pred_output_location))
 tree = ast.parse(agent_func)
-print(astunparse.dump(tree))
+#print(codegen.dump(tree))
 #astpretty.pprint(tree.body[0])
 
 # try unparse
-code = astunparse.unparse(tree)
+code = codegen.codegen(tree)
 print(code)
 

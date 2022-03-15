@@ -1,4 +1,3 @@
-"Usage: unparse.py <path to source file>"
 from __future__ import print_function, unicode_literals
 import six
 import sys
@@ -7,9 +6,6 @@ import os
 import tokenize
 from six import StringIO
 
-# Large float and imaginary literals get turned into infinities in the AST.
-# We unparse those infinities to INFSTR.
-INFSTR = "1e" + repr(sys.float_info.max_10_exp + 1)
 
 def interleave(inter, f, seq):
     """Call f on each item in seq, calling inter() in between.
@@ -24,24 +20,142 @@ def interleave(inter, f, seq):
             inter()
             f(x)
 
-class Unparser:
+class CodeGenerator:
     """Methods in this class recursively traverse an AST and
     output source code for the abstract syntax; original formatting
     is disregarded. """
 
+    # represents built in functions
+    pythonbuiltins = ["abs", "float", "int"]
+    
+    # basic types
+    basic_arg_types = ['float', 'int']
+    
+    # supported math constansts    
+    mathconsts = {"pi": "M_PI",
+                  "e": "M_E",
+                  "inf": "INFINITY",
+                  "nan": "NAN",
+                  }
+    
+    # support for most numpy types except complex numbers and float>64bit
+    numpytypes = {"byte": "signed char",
+                  "byte": "unsigned char",
+                  "short": "short",
+                  "ushort": "unsigned short",
+                  "intc": "int",
+                  "uintc": "unsigned int",
+                  "uint": "unisgned int",
+                  "longlong": "long long",
+                  "ulonglong": "unsigned long long",
+                  "half": "half",       # cuda supported
+                  "single": "float",
+                  "double": "double",
+                  "longdouble": "long double",
+                  "bool_": "bool",
+                  "bool8": "bool",
+                  # sized aliases
+                  "int_": "long",
+                  "int8": "int8_t",
+                  "int16": "int16_t",
+                  "int32": "int32_t",
+                  "int64": "int64_t",
+                  "intp": "intptr_t",
+                  "uint_": "long",
+                  "uint8": "uint8_t",
+                  "uint16": "uint16_t",
+                  "uint32": "uint32_t",
+                  "uint64": "uint64_t",
+                  "uintp": "uintptr_t",
+                  "float_": "float",
+                  "float16": "half",
+                  "float32": "float",
+                  "float64": "double"
+                  }
+    
+    # getVariableType and setVariableType functions are added dynamically    
+    fgpu_funcs = {"getID": "getID",
+                 "getStepCounter": "getStepCounter",
+                 "getThreadIndex": "getThreadIndex"
+                 }
+                 
+    fgpu_attrs = ["ALIVE", "DEAD"]
+    fgpu_input_msg_funcs = {"getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
+    fgpu_output_msg_funcs = {"setVariableFloat": "setVariable<float>", "setVariableInt": "setVariable<int>"}
+    fgpu_agent_out_msg_funcs = {"getID": "getID"} # + get and set typed variables
+    fgpu_env_funcs = {"getPropertyFloat": "getProperty<float>", "getPropertyInt": "getProperty<int>"}
+    fgpu_rand_funcs = {}
+    
+    _fgpu_types = {"Float": "float",
+                  "Double": "double",
+                  "Int": "int",
+                  "UInt": "unsigned int",
+                  "Int8": "int_8",
+                  "UInt8": "uint_8",
+                  "Char": "char",
+                  "UChar": "unsigned char",
+                  "Int16": "int_16",
+                  "UInt16": "uint_16",
+                  "Int32": "int_32",
+                  "UInt32": "uint_32",
+                  "Int64": "int_64",
+                  "UInt64": "uint_64"
+                 }
+
+
     def __init__(self, tree, file = sys.stdout):
-        """Unparser(tree, file=sys.stdout) -> None.
+        """CodeGenerator(tree, file=sys.stdout) -> None.
          Print the source for tree to file."""
         self.f = file
         self.future_imports = []
         self._indent = 0
+        # generate function prototypes
+        self._populateDeviceFuncTypes(self.fgpu_funcs, ["getVariable", "setVariable"], self._fgpu_types)
         # dict of locals used to determine if variable already exists in assignments
         self._locals = ["FLAMEGPU"]
-        self._device_functions = [] # not actually checked anyf unction call is allowed for now
+        self._device_functions = [] # not actually checked any function call is allowed for now
         self._message_iterator_var = None;
         self.dispatch(tree)
         print("", file=self.f)
         self.f.flush()
+        
+    def _populateDeviceFuncTypes(self, func_dict, funcs, types):
+        for func in funcs:
+            for t in types.keys():
+                # generate python function name
+                py_func = f"{func}{t}"
+                # generate cpp function name
+                cpp_func = f"{func}<{types[t]}>"
+                # append to dict
+                func_dict[py_func] = cpp_func
+                
+    def _deviceVariableFunctionName(self, tree, py_func):
+        cpp_func_name = ""
+        # extract function name start
+        if py_func.startswith("getVariable"):
+            cpp_func_name = "getVariable"
+            py_func = py_func[len("getVariable"):]
+        elif py_func.startswith("setVariable"):
+            cpp_func_name = "setVariable"
+            py_func = py_func[len("setVariable"):]
+        else:
+            return None
+        
+        #split to get type and Array Length   (this could instead be looked up form the model description      
+        type_and_length = py_func.split("Array")
+        # check type
+        if type_and_length[0] not in self._fgpu_types:
+            self.RaiseError(tree, f"'{type_and_length[0]}' is not a valid FLAME GPU type")
+        # generate template args
+        if (len(type_and_length) == 1):
+            cpp_func_name += f"<{type_and_length[0]}>"
+        elif (len(type_and_length) == 2):
+            cpp_func_name += f"<{type_and_length[0]}, {type_and_length[1]}>"
+        else:
+            return None
+            
+        return cpp_func_name
+        
 
 
     def fill(self, text = ""):
@@ -148,60 +262,90 @@ class Unparser:
         self.leave()
         self._message_iterator_var = None
     
-    # argument
-    def _FGPU2arg(self, t):
-        self.write(t.arg)
-        if t.annotation:
-            self.write(": ")
-            self.dispatch(t.annotation)    
+    def dispatchMemberFunction(self,t):
+        """
+        A very limited set of function calls to members are supported so these are fully evaluated here.
+        Function calls permittred are;
+         * FLAMEGPU.function - a supported function call. e.g. FLAMEGPU.getVariableFloat(). This will be translated into a typed Cpp call.
+         * message_input.function - a call to the message input variable (the name of which is specified in the function definition)
+         * message_output.function - a call to the message output variable (the name of which is specified in the function definition)
+         * FLAMEGPU.environment.function - the only nested attribute type. This will be translated into a typed Cpp call.
+         * math.function - Any function calls from python `math` are translated to calls raw function calls. E.g. `math.sin()` becomes `sin()`
+         * numpy.type - Any numpy types are translated to static casts
+        """
+        # Environment
+        if isinstance(t.value, ast.Attribute):
+            # only nested attribute type is environment
+            if not isinstance(t.value.value, ast.Name):
+                self.RaiseError(t, "Unknown or unsupported nested attribute")
+            if t.value.value.id == "FLAMEGPU" and t.value.attr == "environment":
+                # check it is a supported environment function
+                if t.attr in self.fgpu_env_funcs.keys(): 
+                    # proceed
+                    self.write("FLAMEGPU->environment.")
+                    self.write(self.fgpu_env_funcs[t.attr])
+                else: 
+                    self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.environment object")
+            elif t.value.value.id == "FLAMEGPU" and t.value.attr == "random":
+                pass # TODO
+            elif t.value.value.id == "FLAMEGPU" and t.value.attr == "agent_out":
+                pass # TODO
+            else:
+                self.RaiseError(t, f"Unknown or unsupported nested attribute in {t.value.value.id}")
+        # FLAMEGPU singleton
+        elif isinstance(t.value, ast.Name):
+            if t.value.id == "FLAMEGPU":
+                # check for legit FGPU function calls 
+                self.write("FLAMEGPU->")
+                if t.attr in self.fgpu_funcs.keys():
+                    # proceed
+                    self.write(self.fgpu_funcs[t.attr])
+                else:
+                    # possible getter setter type function
+                    py_func = self._deviceVariableFunctionName(t, t.attr)
+                    if not py_func:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU object")
+                    # proceed
+                    self.write(py_func)
+                
+            # message input arg
+            elif self._message_iterator_var:
+                if t.value.id == self._message_iterator_var:
+                    # check for legit FGPU function calls and translate
+                    if t.attr in self.fgpu_input_msg_funcs.keys():     
+                        # proceed
+                        self.write(f"{self._message_iterator_var}.")
+                        self.write(self.fgpu_input_msg_funcs[t.attr])
+                    else:
+                        self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
+                        
+            # message output arg
+            elif t.value.id == self._output_message_var:
+                # check for legit FGPU function calls and translate
+                if t.attr in self.fgpu_output_msg_funcs.keys(): 
+                    # proceed
+                    self.write("FLAMEGPU->message_in.")
+                    self.write(self.fgpu_output_msg_funcs[t.attr])
+                else:
+                    self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
+            
+            # math functions (try them in raw function call format) or constants
+            elif t.value.id == "math":
+                self.write(t.attr)
+            # numpy types
+            elif t.value.id == "numpy" or t.value.id == "np":
+                if t.attr in self.numpytypes:
+                    self.write(f"static_cast<{self.numpytypes[t.attr]}>")
+                else: 
+                    self.RaiseError(t, f"Unsupported numpy type {t.attr}")
+            else:
+                self.RaiseError(t, f"Global '{t.value.id}' identifier not supported")
+        else:
+            self.RaiseError(t, "Unsupported function call syntax")
+     
     
-    # represents built in functions
-    pythonbuiltins = ["abs", "float", "int"]
-    
-    # basic types
-    basic_arg_types = ['float', 'int']
-    
-    # supported math constansts    
-    mathconsts = {"pi": "M_PI",
-                  "e": "M_E",
-                  "inf": "INFINITY",
-                  "nan": "NAN",
-                  }
-    
-    # support for most numpy types except complex numbers and float>64bit
-    numpytypes = {"byte": "signed char",
-                  "byte": "unsigned char",
-                  "short": "short",
-                  "ushort": "unsigned short",
-                  "intc": "int",
-                  "uintc": "unsigned int",
-                  "uint": "unisgned int",
-                  "longlong": "long long",
-                  "ulonglong": "unsigned long long",
-                  "half": "half",       # cuda supported
-                  "single": "float",
-                  "double": "double",
-                  "longdouble": "long double",
-                  "bool_": "bool",
-                  "bool8": "bool",
-                  # sized aliases
-                  "int_": "long",
-                  "int8": "int8_t",
-                  "int16": "int16_t",
-                  "int32": "int32_t",
-                  "int64": "int64_t",
-                  "intp": "intptr_t",
-                  "uint_": "long",
-                  "uint8": "uint8_t",
-                  "uint16": "uint16_t",
-                  "uint32": "uint32_t",
-                  "uint64": "uint64_t",
-                  "uintp": "uintptr_t",
-                  "float_": "float",
-                  "float16": "half",
-                  "float32": "float",
-                  "float64": "double"
-                  }
+   
+     
 
     ############### Unparsing methods ######################
     # There should be one method per concrete grammar type #
@@ -416,25 +560,37 @@ class Unparser:
                     if len(t.iter.args) == 1:
                         self.fill(f"for (int ")
                         self.dispatch(t.target)
-                        self.write("=0;i<")
+                        self.write("=0;")
+                        self.dispatch(t.target)
+                        self.write("<")
                         self.dispatch(t.iter.args[0])
-                        self.write(";i++)")
+                        self.write(";")
+                        self.dispatch(t.target)
+                        self.write("++)")
                     elif len(t.iter.args) == 2:
                         self.fill(f"for (int ")
                         self.dispatch(t.target)
                         self.write("=")
                         self.dispatch(t.iter.args[0])
-                        seld.write(";i<")
+                        seld.write(";")
+                        self.dispatch(t.target)
+                        self.write("<")
                         self.dispatch(t.iter.args[1])
-                        self.write(";i++)")
+                        self.write(";")
+                        self.dispatch(t.target)
+                        self.write("++)")
                     elif len(t.iter.args) == 3:
                         self.fill(f"for (int ")
                         self.dispatch(t.target)
                         self.write("=")
                         self.dispatch(t.iter.args[0])
-                        seld.write(";i<")
+                        seld.write(";")
+                        self.dispatch(t.target)
+                        self.write("<")
                         self.dispatch(t.iter.args[1])
-                        self.write(";i+=")
+                        self.write(";")
+                        self.dispatch(t.target)
+                        self.write("+=")
                         self.dispatch(t.iter.args[2])
                         self.write(")")
                     else:
@@ -503,246 +659,116 @@ class Unparser:
         self.RaiseError(t, "Bytes function not supported")
 
     def _Str(self, tree):
-        if six.PY3:
-            self.write(repr(tree.s))
-        else:
-            # if from __future__ import unicode_literals is in effect,
-            # then we want to output string literals using a 'b' prefix
-            # and unicode literals with no prefix.
-            if "unicode_literals" not in self.future_imports:
-                self.write(repr(tree.s))
-            elif isinstance(tree.s, str):
-                self.write("b" + repr(tree.s))
-            elif isinstance(tree.s, unicode):
-                self.write(repr(tree.s).lstrip("u"))
-            else:
-                assert False, "shouldn't get here"
-
+        self.write(repr(tree.s))
+        
     def _JoinedStr(self, t):
-        # JoinedStr(expr* values)
-        self.write("f")
-        string = StringIO()
-        self._fstring_JoinedStr(t, string.write)
-        # Deviation from `unparse.py`: Try to find an unused quote.
-        # This change is made to handle _very_ complex f-strings.
-        v = string.getvalue()
-        if '\n' in v or '\r' in v:
-            quote_types = ["'''", '"""']
-        else:
-            quote_types = ["'", '"', '"""', "'''"]
-        for quote_type in quote_types:
-            if quote_type not in v:
-                v = "{quote_type}{v}{quote_type}".format(quote_type=quote_type, v=v)
-                break
-        else:
-            v = repr(v)
-        self.write(v)
+        self.RaiseError(t, "Joined strings not supported")
 
     def _FormattedValue(self, t):
-        # FormattedValue(expr value, int? conversion, expr? format_spec)
-        self.write("f")
-        string = StringIO()
-        self._fstring_JoinedStr(t, string.write)
-        self.write(repr(string.getvalue()))
+        self.RaiseError(t, "Formatted strings not supported")
 
     def _fstring_JoinedStr(self, t, write):
-        for value in t.values:
-            meth = getattr(self, "_fstring_" + type(value).__name__)
-            meth(value, write)
+        self.RaiseError(t, "F strings not supported")
 
     def _fstring_Str(self, t, write):
-        value = t.s.replace("{", "{{").replace("}", "}}")
-        write(value)
+        self.RaiseError(t, "F strings not supported")
 
     def _fstring_Constant(self, t, write):
-        assert isinstance(t.value, str)
-        value = t.value.replace("{", "{{").replace("}", "}}")
-        write(value)
+        self.RaiseError(t, "F strings not supported")
 
     def _fstring_FormattedValue(self, t, write):
-        write("{")
-        expr = StringIO()
-        Unparser(t.value, expr)
-        expr = expr.getvalue().rstrip("\n")
-        if expr.startswith("{"):
-            write(" ")  # Separate pair of opening brackets as "{ {"
-        write(expr)
-        if t.conversion != -1:
-            conversion = chr(t.conversion)
-            assert conversion in "sra"
-            write("!{conversion}".format(conversion=conversion))
-        if t.format_spec:
-            write(":")
-            meth = getattr(self, "_fstring_" + type(t.format_spec).__name__)
-            meth(t.format_spec, write)
-        write("}")
+        self.RaiseError(t, "F strings not supported")
 
     def _Name(self, t):
+        """
+        Everything ends up as a Name once it is an identifier
+        """
         self.write(t.id)
 
     def _NameConstant(self, t):
-        self.write(repr(t.value))
+        self.RaiseError(t, "NameConstant depreciated and not supported")
 
     def _Repr(self, t):
-        self.write("`")
-        self.dispatch(t.value)
-        self.write("`")
-
-    def _write_constant(self, value):
-        if isinstance(value, (float, complex)):
-            # Substitute overflowing decimal literal for AST infinities.
-            self.write(repr(value).replace("inf", INFSTR))
+        self.RaiseError(t, "Repr not supported")
+     
+    def _Constant(self, t):
+        """
+        Restrict most types of constant except for numeric types and constant strings
+        """
+        value = t.value
+        if isinstance(value, tuple):
+            self.RaiseError(t, "Tuples not supported")
+        if isinstance(value, dict):
+            self.RaiseError(t, "Dictionaries not supported")
+        if isinstance(value, list):
+            self.RaiseError(t, "Lists not supported")
+        elif value is Ellipsis: # instead of `...` for Py2 compatibility
+            self.RaiseError(t, "Ellipsis not supported")
         elif isinstance(value, str):
-            self.write(f"\"{value}\"")
+            self.write(repr(value))
         else:
             self.write(repr(value))
 
-    def _Constant(self, t):
-        value = t.value
-        if isinstance(value, tuple):
-            self.write("(")
-            if len(value) == 1:
-                self._write_constant(value[0])
-                self.write(",")
-            else:
-                interleave(lambda: self.write(", "), self._write_constant, value)
-            self.write(")")
-        elif value is Ellipsis: # instead of `...` for Py2 compatibility
-            self.write("...")
-        else:
-            if t.kind == "u":
-                self.write("u")
-            self._write_constant(t.value)
-
     def _Num(self, t):
-        repr_n = repr(t.n)
-        if six.PY3:
-            self.write(repr_n.replace("inf", INFSTR))
-        else:
-            # Parenthesize negative numbers, to avoid turning (-1)**2 into -1**2.
-            if repr_n.startswith("-"):
-                self.write("(")
-            if "inf" in repr_n and repr_n.endswith("*j"):
-                repr_n = repr_n.replace("*j", "j")
-            # Substitute overflowing decimal literal for AST infinities.
-            self.write(repr_n.replace("inf", INFSTR))
-            if repr_n.startswith("-"):
-                self.write(")")
+        self.write(repr(t.n))
 
     def _List(self, t):
-        self.write("[")
-        interleave(lambda: self.write(", "), self.dispatch, t.elts)
-        self.write("]")
+        self.RaiseError(t, "Lists not supported")
 
     def _ListComp(self, t):
-        self.write("[")
-        self.dispatch(t.elt)
-        for gen in t.generators:
-            self.dispatch(gen)
-        self.write("]")
+        self.RaiseError(t, "List comprehension not supported")
 
     def _GeneratorExp(self, t):
-        self.write("(")
-        self.dispatch(t.elt)
-        for gen in t.generators:
-            self.dispatch(gen)
-        self.write(")")
+        self.RaiseError(t, "Generator expressions not supported")
 
     def _SetComp(self, t):
-        self.write("{")
-        self.dispatch(t.elt)
-        for gen in t.generators:
-            self.dispatch(gen)
-        self.write("}")
+        self.RaiseError(t, "Set comprehension not supported")
 
     def _DictComp(self, t):
-        self.write("{")
-        self.dispatch(t.key)
-        self.write(": ")
-        self.dispatch(t.value)
-        for gen in t.generators:
-            self.dispatch(gen)
-        self.write("}")
+        self.RaiseError(t, "Dictionary comprehension not supported")
 
     def _comprehension(self, t):
-        if getattr(t, 'is_async', False):
-            self.write(" async for ")
-        else:
-            self.write(" for ")
-        self.dispatch(t.target)
-        self.write(" in ")
-        self.dispatch(t.iter)
-        for if_clause in t.ifs:
-            self.write(" if ")
-            self.dispatch(if_clause)
+        self.RaiseError(t, "Comprehension not supported")
 
     def _IfExp(self, t):
-        self.write("(")
-        self.dispatch(t.body)
-        self.write(" if ")
+        """
+        Equivalent to a ternary operator
+        """
         self.dispatch(t.test)
-        self.write(" else ")
+        self.write(" ? ")
+        self.dispatch(t.body)
+        self.write(" : ")
         self.dispatch(t.orelse)
-        self.write(")")
+
 
     def _Set(self, t):
-        assert(t.elts) # should be at least one element
-        self.write("{")
-        interleave(lambda: self.write(", "), self.dispatch, t.elts)
-        self.write("}")
+        self.RaiseError(t, "Sets not supported")
 
     def _Dict(self, t):
-        self.write("{")
-        def write_key_value_pair(k, v):
-            self.dispatch(k)
-            self.write(": ")
-            self.dispatch(v)
-
-        def write_item(item):
-            k, v = item
-            if k is None:
-                # for dictionary unpacking operator in dicts {**{'y': 2}}
-                # see PEP 448 for details
-                self.write("**")
-                self.dispatch(v)
-            else:
-                write_key_value_pair(k, v)
-        interleave(lambda: self.write(", "), write_item, zip(t.keys, t.values))
-        self.write("}")
+        self.RaiseError(t, "Dictionaries not supported")
 
     def _Tuple(self, t):
-        self.write("(")
-        if len(t.elts) == 1:
-            elt = t.elts[0]
-            self.dispatch(elt)
-            self.write(",")
-        else:
-            interleave(lambda: self.write(", "), self.dispatch, t.elts)
-        self.write(")")
+        self.RaiseError(t, "Tuples not supported")
 
-    unop = {"Invert":"~", "Not": "not", "UAdd":"+", "USub":"-"}
+    unop = {"Invert":"~", "Not": "!", "UAdd":"+", "USub":"-"}
     def _UnaryOp(self, t):
+        """
+        Translate to C equivalent opertaors
+        """
         self.write("(")
         self.write(self.unop[t.op.__class__.__name__])
         self.write(" ")
-        if six.PY2 and isinstance(t.op, ast.USub) and isinstance(t.operand, ast.Num):
-            # If we're applying unary minus to a number, parenthesize the number.
-            # This is necessary: -2147483648 is different from -(2147483648) on
-            # a 32-bit machine (the first is an int, the second a long), and
-            # -7j is different from -(7j).  (The first has real part 0.0, the second
-            # has real part -0.0.)
-            self.write("(")
-            self.dispatch(t.operand)
-            self.write(")")
-        else:
-            self.dispatch(t.operand)
+        self.dispatch(t.operand)
         self.write(")")
 
     binop = { "Add":"+", "Sub":"-", "Mult":"*", "MatMult":"@", "Div":"/", "Mod":"%",
                     "LShift":"<<", "RShift":">>", "BitOr":"|", "BitXor":"^", "BitAnd":"&",
                     "FloorDiv":"//", "Pow": "**"}
     def _BinOp(self, t):
-
+        """
+        Python style pow and floordiv are not supported so translate to a function call.
+        No matrix mul support.
+        """
         op_name = t.op.__class__.__name__
         # translate pow into function call (no float version)
         if op_name == "Pow":
@@ -773,98 +799,77 @@ class Unparser:
         self.write("(")
         self.dispatch(t.left)
         for o, e in zip(t.ops, t.comparators):
+            # detect list ops
+            if o.__class__.__name__ == "In" or o.__class__.__name__ == "NotIn":
+                self.RaiseError(t, "In and NotIn operators not supported")
             self.write(" " + self.cmpops[o.__class__.__name__] + " ")
             self.dispatch(e)
         self.write(")")
 
-    boolops = {ast.And: 'and', ast.Or: 'or'}
+    boolops = {ast.And: '&&', ast.Or: '||'}
     def _BoolOp(self, t):
+        """
+        Translate to logical and/or operators in C
+        """
         self.write("(")
         s = " %s " % self.boolops[t.op.__class__]
         interleave(lambda: self.write(s), self.dispatch, t.values)
         self.write(")")
-
-    fgpufuncs = {"getID": "getID", "getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
-    fgpuattrs = ["ALIVE", "DEAD"]
-    input_msg_funcs = {"getVariableFloat": "getVariable<float>", "getVariableInt": "getVariable<int>"}
-    output_msg_funcs = {"setVariableFloat": "setVariable<float>", "setVariableInt": "setVariable<int>"}
-    env_funcs = {"getPropertyFloat": "getProperty<float>", "getPropertyInt": "getProperty<int>"}
-            
+       
     def _Attribute(self,t):
+        """
+        A very limited set of attributes are supported so these are fully evaluated here. Other places where attribute type expressions may occur will also evaluate them fully rather than recursively call this function.
+        Attributes supported are only;
+         * FLAMEGPU.attribute - a supported attribute e.g. FLAMEGPU.ALIVE. This will be translated into a namespace member.
+         * math.constant - Any supported math constants are translated to C definition versions
+        """
         # Only a limited set of globals supported
         func_dict = None
-        # constant is nested attribute
-        if isinstance(t.value, ast.Attribute):
-            # only nested attribute type is environment
-            if not isinstance(t.value.value, ast.Name):
-                self.RaiseError(t, "Unknown or unsupported nested attribute")
-            if t.value.value.id == "FLAMEGPU" and t.value.attr == "environment":
-                # check it is a supported ennvironment function
-                if t.attr in self.env_funcs.keys(): 
-                    # proceed
-                    self.write("FLAMEGPU->environment.")
-                    self.write(self.env_funcs[t.attr])
-                else: 
-                    self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU.environment object")
-            else:
-                self.RaiseError(t, f"Unknown or unsupported nested attribute in {t.value.value.id}")
+        
         # FLAMEGPU singleton
-        elif isinstance(t.value, ast.Name):
+        if isinstance(t.value, ast.Name):
             if t.value.id == "FLAMEGPU":
-                # check for legit FGPU function calls 
-                if t.attr in self.fgpufuncs.keys():
-                    # proceed
-                    self.write("FLAMEGPU->")
-                    self.write(self.fgpufuncs[t.attr])
-                elif t.attr in self.fgpuattrs:
+                if t.attr in self.fgpu_attrs:
                     # proceed
                     self.write("FLAMEGPU::")
                     self.write(t.attr)
                 else:
-                    self.RaiseError(t, f"Function '{t.attr}' does not exist in FLAMEGPU object")
-                
-            # message input arg
-            elif self._message_iterator_var:
-                if t.value.id == self._message_iterator_var:
-                    # check for legit FGPU function calls and translate
-                    if t.attr in self.input_msg_funcs.keys():     
-                        # proceed
-                        self.write(f"{self._message_iterator_var}.")
-                        self.write(self.input_msg_funcs[t.attr])
-                    else:
-                        self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._message_iterator_var}' message input iterable object")
-                        
-            # message output arg
-            elif t.value.id == self._output_message_var:
-                # check for legit FGPU function calls and translate
-                if t.attr in self.output_msg_funcs.keys(): 
-                    # proceed
-                    self.write("FLAMEGPU->message_in.")
-                    self.write(self.output_msg_funcs[t.attr])
-                else:
-                    self.RaiseError(t, f"Function '{t.attr}' does not exist in '{self._output_message_var}' message output object")
-            
-            # math functions (try them in raw function call format)
+                    self.RaiseError(t, f"Attriobute '{t.attr}' does not exist in FLAMEGPU object")
+            # math functions (try them in raw function call format) or constants
             elif t.value.id == "math":
-                self.write(t.attr)
+                if t.attr in self.mathconsts:
+                    self.write(self.mathconsts[t.attr])
+                else:
+                    self.RaiseError(t, f"Unsupported math constant '{t.attr}'")
             # numpy types
             elif t.value.id == "numpy" or t.value.id == "np":
+                # not sure how a numpy attribute would be used without function call or type hint but translate anyway 
                 if t.attr in self.numpytypes:
-                    self.write(f"static_cast<{self.numpytypes[t.attr]}>")
+                    self.write(self.numpytypes[t.attr])
                 else: 
                     self.RaiseError(t, f"Unsupported numpy type {t.attr}")
             else:
                 self.RaiseError(t, f"Global '{t.value.id}' identifiers not supported")
         else:
-            self.RaiseError(t, "Unsupported function call syntax")
+            self.RaiseError(t, "Unsupported attribute")
 
     def _Call(self, t):
+        """
+        Some basic checks are undertaken on calls to ensure that the function being called if either a builtin or defined device function.]
+        A special dispatcher is required 
+        """
+        # TODO: call a special version of attribute dispatchMemberFunction(...)
         # check calls but let attributes check in their own dispatcher
         funcs = self._device_functions + self.pythonbuiltins
         if isinstance(t.func, ast.Name):
             if (t.func.id not in funcs):
                 self.RaiseWarning(t, "Function call is not a defined FLAME GPU device function or a supported python built in.")
-        self.dispatch(t.func)
+            else:
+                self.dispatch(t.func)
+        else:
+            # special handler for dispatching member function calls
+            # This would otherwise be an attribute
+            self.dispatchMemberFunction(t.func)        
         self.write("(")
         comma = False
         for e in t.args:
@@ -881,168 +886,52 @@ class Unparser:
         self.write(")")
 
     def _Subscript(self, t):
+        """
+        Arrays are not supported so no need for this but no harm
+        """
         self.dispatch(t.value)
         self.write("[")
         self.dispatch(t.slice)
         self.write("]")
 
     def _Starred(self, t):
-        self.write("*")
-        self.dispatch(t.value)
+        self.RaiseError(t, "Starred values not supported")
 
     # slice
     def _Ellipsis(self, t):
-        self.write("...")
+        self.RaiseError(t, "Ellipsis values not supported")
 
     def _Index(self, t):
-        self.dispatch(t.value)
+        self.RaiseError(t, "Index values not supported")
 
     def _Slice(self, t):
-        if t.lower:
-            self.dispatch(t.lower)
-        self.write(":")
-        if t.upper:
-            self.dispatch(t.upper)
-        if t.step:
-            self.write(":")
-            self.dispatch(t.step)
+        self.RaiseError(t, "Slicing values not supported")
 
     def _ExtSlice(self, t):
-        interleave(lambda: self.write(', '), self.dispatch, t.dims)
+        self.RaiseError(t, "ExtSlice values not supported")
 
     # argument
     def _arg(self, t):
-        self.write(t.arg)
-        if t.annotation:
-            self.write(": ")
-            self.dispatch(t.annotation)
+        """
+        Arguments should be processed by a custom dispatcher and it should not be possible to get here
+        """
+        self.RaiseError(t, "Arguments should already have been processed")
 
     # others
     def _arguments(self, t):
-        first = True
-        # normal arguments
-        all_args = getattr(t, 'posonlyargs', []) + t.args
-        defaults = [None] * (len(all_args) - len(t.defaults)) + t.defaults
-        for index, elements in enumerate(zip(all_args, defaults), 1):
-            a, d = elements
-            if first:first = False
-            else: self.write(", ")
-            self.dispatch(a)
-            if d:
-                self.write("=")
-                self.dispatch(d)
-            if index == len(getattr(t, 'posonlyargs', ())):
-                self.write(", /")
-
-        # varargs, or bare '*' if no varargs but keyword-only arguments present
-        if t.vararg or getattr(t, "kwonlyargs", False):
-            if first:first = False
-            else: self.write(", ")
-            self.write("*")
-            if t.vararg:
-                if hasattr(t.vararg, 'arg'):
-                    self.write(t.vararg.arg)
-                    if t.vararg.annotation:
-                        self.write(": ")
-                        self.dispatch(t.vararg.annotation)
-                else:
-                    self.write(t.vararg)
-                    if getattr(t, 'varargannotation', None):
-                        self.write(": ")
-                        self.dispatch(t.varargannotation)
-
-        # keyword-only arguments
-        if getattr(t, "kwonlyargs", False):
-            for a, d in zip(t.kwonlyargs, t.kw_defaults):
-                if first:first = False
-                else: self.write(", ")
-                self.dispatch(a),
-                if d:
-                    self.write("=")
-                    self.dispatch(d)
-
-        # kwargs
-        if t.kwarg:
-            if first:first = False
-            else: self.write(", ")
-            if hasattr(t.kwarg, 'arg'):
-                self.write("**"+t.kwarg.arg)
-                if t.kwarg.annotation:
-                    self.write(": ")
-                    self.dispatch(t.kwarg.annotation)
-            else:
-                self.write("**"+t.kwarg)
-                if getattr(t, 'kwargannotation', None):
-                    self.write(": ")
-                    self.dispatch(t.kwargannotation)
+        """
+        Arguments should be processed by a custom dispatcher and it should not be possible to get here
+        """
+        self.RaiseError(t, "Arguments should already have been processed")
 
     def _keyword(self, t):
-        if t.arg is None:
-            # starting from Python 3.5 this denotes a kwargs part of the invocation
-            self.write("**")
-        else:
-            self.write(t.arg)
-            self.write("=")
-        self.dispatch(t.value)
+        self.RaiseError(t, "Keywords are not supported")
 
     def _Lambda(self, t):
-        self.write("(")
-        self.write("lambda ")
-        self.dispatch(t.args)
-        self.write(": ")
-        self.dispatch(t.body)
-        self.write(")")
+        self.RaiseError(t, "Lambda is not supported")
 
     def _alias(self, t):
-        self.write(t.name)
-        if t.asname:
-            self.write(" as "+t.asname)
+        self.RaiseError(t, "Aliasing is not supported")
 
     def _withitem(self, t):
-        self.dispatch(t.context_expr)
-        if t.optional_vars:
-            self.write(" as ")
-            self.dispatch(t.optional_vars)
-
-def roundtrip(filename, output=sys.stdout):
-    if six.PY3:
-        with open(filename, "rb") as pyfile:
-            encoding = tokenize.detect_encoding(pyfile.readline)[0]
-        with open(filename, "r", encoding=encoding) as pyfile:
-            source = pyfile.read()
-    else:
-        with open(filename, "r") as pyfile:
-            source = pyfile.read()
-    tree = compile(source, filename, "exec", ast.PyCF_ONLY_AST, dont_inherit=True)
-    Unparser(tree, output)
-
-
-
-def testdir(a):
-    try:
-        names = [n for n in os.listdir(a) if n.endswith('.py')]
-    except OSError:
-        print("Directory not readable: %s" % a, file=sys.stderr)
-    else:
-        for n in names:
-            fullname = os.path.join(a, n)
-            if os.path.isfile(fullname):
-                output = StringIO()
-                print('Testing %s' % fullname)
-                try:
-                    roundtrip(fullname, output)
-                except Exception as e:
-                    print('  Failed to compile, exception is %s' % repr(e))
-            elif os.path.isdir(fullname):
-                testdir(fullname)
-
-def main(args):
-    if args[0] == '--testdir':
-        for a in args[1:]:
-            testdir(a)
-    else:
-        for a in args:
-            roundtrip(a)
-
-if __name__=='__main__':
-    main(sys.argv[1:])
+        self.RaiseError(t, "With not supported")

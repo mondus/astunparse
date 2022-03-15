@@ -1,29 +1,8 @@
 import codecs
 import os
 import sys
-if sys.version_info < (2, 7):
-    import unittest2 as unittest
-else:
-    import unittest
-
-import six
-if six.PY3:
-    import tokenize
-else:
-    from lib2to3.pgen2 import tokenize
-
-def read_pyfile(filename):
-    """Read and return the contents of a Python source file (as a
-    string), taking into account the file encoding."""
-    if six.PY3:
-        with open(filename, "rb") as pyfile:
-            encoding = tokenize.detect_encoding(pyfile.readline)[0]
-        with codecs.open(filename, "r", encoding=encoding) as pyfile:
-            source = pyfile.read()
-    else:
-        with open(filename, "r") as pyfile:
-            source = pyfile.read()
-    return source
+import pytest
+from unittest import TestCase
 
 code_parseable_in_all_parser_modes = """\
 (a + b + c) * (d + e + f)
@@ -166,34 +145,19 @@ async def f():
         suite1
 """
 
-class AstunparseCommonTestCase:
-    # Tests for specific bugs found in earlier versions of unparse
+class CodeGenTest(TestCase):
 
-    def assertASTEqual(self, dump1, dump2):
-        raise NotImplementedError()
-
-    def check_roundtrip(self, code1, filename="internal", mode="exec"):
-        raise NotImplementedError()
 
     test_directories = [
         os.path.join(getattr(sys, 'real_prefix', sys.prefix),
                      'lib', 'python%s.%s' % sys.version_info[:2])]
 
-    def test_files(self):
-        names = []
-        for test_dir in self.test_directories:
-            for n in os.listdir(test_dir):
-                if n.endswith('.py') and not n.startswith('bad'):
-                    names.append(os.path.join(test_dir, n))
+    def checkExpected(source, expected):
+        tree = ast.parse(source)
+        # try unparse
+        code = astunparse.unparse(tree)
+        print(code)
 
-        for filename in names:
-            print('Testing %s' % filename)
-            source = read_pyfile(filename)
-            self.check_roundtrip(source)
-
-    def test_parser_modes(self):
-        for mode in ['exec', 'single', 'eval']:
-            self.check_roundtrip(code_parseable_in_all_parser_modes, mode=mode)
 
     def test_del_statement(self):
         self.check_roundtrip("del x, y, z")
