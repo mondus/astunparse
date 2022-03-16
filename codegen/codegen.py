@@ -113,15 +113,6 @@ class CodeGenerator:
         print("", file=self.f)
         self.f.flush()
         
-    def _populateDeviceFuncTypes(self, func_dict, funcs, types):
-        for func in funcs:
-            for t in types.keys():
-                # generate python function name
-                py_func = f"{func}{t}"
-                # generate cpp function name
-                cpp_func = f"{func}<{types[t]}>"
-                # append to dict
-                func_dict[py_func] = cpp_func
                 
     def _deviceVariableFunctionName(self, tree, py_func, permitted_prefixes, allow_lengths = True):
         """
@@ -197,9 +188,16 @@ class CodeGenerator:
         print(f"Error ({tree.lineno}, {tree.col_offset}): {str}")
 
 
-    ### Validation of format functions
+    ############### Cutsom Unparsing methods ###############
+    # These are special versions of the ast unparsing      #
+    # dispatch functions.                                  #
+    ########################################################
     
     def dispatchFGPUFunctionArgs(self, tree):
+        """
+        Handles arguments for a FLAME GPU function. Arguments must have syntax of `message_in: MessageInType, message_out: MessageOutType`
+        Type hinting is required to translate a type into a FLAME GPU Message type implementation
+        """
         if len(tree.args) != 2:
             self.RaiseError("Expected two FLAME GPU function arguments (input message and output message)")
         MessageTypes = ["MessageNone", "MessageBruteForce"]
@@ -241,6 +239,9 @@ class CodeGenerator:
 
     
     def dispatchFGPUDeviceFunctionArgs(self, tree):
+        """
+        Handles arguments for a FLAME GPU device function. Arguments must use type hinting to be translated to cpp.
+        """
         # input message
         first = True
         annotation = None
@@ -256,6 +257,10 @@ class CodeGenerator:
             first = False    
     
     def dispatchMessageLoop(self, tree):
+        """
+        This is a special case of a range based for loop in which iterator item returns a const referecne to the message.
+        Any user specified message value can be used.
+        """
         self.fill("for (const auto& ")
         self.dispatch(tree.target)
         self.write(" : FLAMEGPU->")

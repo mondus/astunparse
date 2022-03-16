@@ -1,8 +1,9 @@
 import codecs
 import os
 import sys
+import six
 import pytest
-from unittest import TestCase
+import unittest
 
 code_parseable_in_all_parser_modes = """\
 (a + b + c) * (d + e + f)
@@ -145,7 +146,7 @@ async def f():
         suite1
 """
 
-class CodeGenTest(TestCase):
+class CodeGenTest(unittest.TestCase):
 
 
     test_directories = [
