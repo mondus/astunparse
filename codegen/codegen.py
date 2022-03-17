@@ -4,6 +4,7 @@ import sys
 import ast
 import os
 import tokenize
+import warnings
 from six import StringIO
 
 
@@ -19,6 +20,10 @@ def interleave(inter, f, seq):
         for x in seq:
             inter()
             f(x)
+
+class CodeGenException(Exception):
+    """ Generic exception for errors raised in code generation """
+    pass
 
 class CodeGenerator:
     """Methods in this class recursively traverse an AST and
@@ -182,10 +187,10 @@ class CodeGenerator:
         meth(tree)
         
     def RaiseWarning(self, tree, str):
-        print(f"Warning ({tree.lineno}, {tree.col_offset}): {str}")
+        warnings.warn(f"Warning ({tree.lineno}, {tree.col_offset}): {str}")
         
     def RaiseError(self, tree, str):
-        print(f"Error ({tree.lineno}, {tree.col_offset}): {str}")
+        raise CodeGenException(f"Error ({tree.lineno}, {tree.col_offset}): {str}")
 
 
     ############### Cutsom Unparsing methods ###############
@@ -585,13 +590,13 @@ class CodeGenerator:
             # add to list of defined functions that can be called
             self._device_functions.append(t.name)
         else:
-            self.RaiseError(t, "Functions= definition uses an unsupported decorator. Must use either 'flamegpu_agent_function' or 'flamegpu_device_function'")
+            self.RaiseError(t, "Function definition uses an unsupported decorator. Must use either 'flamegpu_agent_function' or 'flamegpu_device_function'")
         self.enter()
         self.dispatch(t.body)
         self.leave()
 
     def _AsyncFunctionDef(self, t):
-        self.RaiseError(t, "Async function snot supported")
+        self.RaiseError(t, "Async functions not supported")
 
     def _For(self, t):
         """
@@ -605,6 +610,9 @@ class CodeGenerator:
                 self.dispatchMessageLoop(t)
             else:
                 self.RaiseError(t, "Range based for loops only support message iteration using 'message_in' iterator")
+        # do not support for else
+        if t.orelse:
+            self.RaiseError(t, "For else not supported")
         # allow calls but only to range function
         elif isinstance(t.iter, ast.Call):
             if isinstance(t.iter.func, ast.Name):
@@ -625,7 +633,7 @@ class CodeGenerator:
                         self.dispatch(t.target)
                         self.write("=")
                         self.dispatch(t.iter.args[0])
-                        seld.write(";")
+                        self.write(";")
                         self.dispatch(t.target)
                         self.write("<")
                         self.dispatch(t.iter.args[1])
@@ -637,7 +645,7 @@ class CodeGenerator:
                         self.dispatch(t.target)
                         self.write("=")
                         self.dispatch(t.iter.args[0])
-                        seld.write(";")
+                        self.write(";")
                         self.dispatch(t.target)
                         self.write("<")
                         self.dispatch(t.iter.args[1])
@@ -665,8 +673,9 @@ class CodeGenerator:
         """
         Fairly straightforward translation to if, else if, else format
         """
-        self.fill("if ")
+        self.fill("if (")
         self.dispatch(t.test)
+        self.write(")")
         self.enter()
         self.dispatch(t.body)
         self.leave()
@@ -674,8 +683,9 @@ class CodeGenerator:
         while (t.orelse and len(t.orelse) == 1 and
                isinstance(t.orelse[0], ast.If)):
             t = t.orelse[0]
-            self.fill("else if ")
+            self.fill("else if (")
             self.dispatch(t.test)
+            self.write(")")
             self.enter()
             self.dispatch(t.body)
             self.leave()
@@ -690,16 +700,14 @@ class CodeGenerator:
         """
         Straightforward translation to c style while loop
         """
-        self.fill("while ")
+        self.fill("while (")
         self.dispatch(t.test)
+        self.write(")")
         self.enter()
         self.dispatch(t.body)
         self.leave()
         if t.orelse:
-            self.fill("else")
-            self.enter()
-            self.dispatch(t.orelse)
-            self.leave()
+            self.RaiseError(t, "While else not supported")
 
     def _With(self, t):
         self.RaiseError(t, "With for not supported")
@@ -757,8 +765,15 @@ class CodeGenerator:
             self.RaiseError(t, "Lists not supported")
         elif value is Ellipsis: # instead of `...` for Py2 compatibility
             self.RaiseError(t, "Ellipsis not supported")
-        elif isinstance(value, str):
+        elif isinstance(value, str): 
             self.write(repr(value))
+        elif isinstance(value, (bytes, bytearray)):  # reject bytes strings e.g. b'123' 
+            self.RaiseError(t, "Byte strings not supported")
+        elif isinstance(value, bool):
+            if value:
+                self.write("true")
+            else:
+                self.write("false")
         else:
             self.write(repr(value))
 
@@ -810,7 +825,6 @@ class CodeGenerator:
         """
         self.write("(")
         self.write(self.unop[t.op.__class__.__name__])
-        self.write(" ")
         self.dispatch(t.operand)
         self.write(")")
 
@@ -849,7 +863,6 @@ class CodeGenerator:
     cmpops = {"Eq":"==", "NotEq":"!=", "Lt":"<", "LtE":"<=", "Gt":">", "GtE":">=",
                         "Is":"==", "IsNot":"!=", "In":"in", "NotIn":"not in"}
     def _Compare(self, t):
-        self.write("(")
         self.dispatch(t.left)
         for o, e in zip(t.ops, t.comparators):
             # detect list ops
@@ -857,7 +870,6 @@ class CodeGenerator:
                 self.RaiseError(t, "In and NotIn operators not supported")
             self.write(" " + self.cmpops[o.__class__.__name__] + " ")
             self.dispatch(e)
-        self.write(")")
 
     boolops = {ast.And: '&&', ast.Or: '||'}
     def _BoolOp(self, t):
@@ -911,7 +923,6 @@ class CodeGenerator:
         Some basic checks are undertaken on calls to ensure that the function being called if either a builtin or defined device function.]
         A special dispatcher is required 
         """
-        # TODO: call a special version of attribute dispatchMemberFunction(...)
         # check calls but let attributes check in their own dispatcher
         funcs = self._device_functions + self.pythonbuiltins
         if isinstance(t.func, ast.Name):
@@ -919,6 +930,8 @@ class CodeGenerator:
                 self.RaiseWarning(t, "Function call is not a defined FLAME GPU device function or a supported python built in.")
             else:
                 self.dispatch(t.func)
+        elif isinstance(t.func, ast.Lambda):
+            self.dispatch(t.func) # not supported
         else:
             # special handler for dispatching member function calls
             # This would otherwise be an attribute

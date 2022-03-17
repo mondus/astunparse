@@ -9,7 +9,6 @@ def func1():
     
     
 agent_func = """
-
 @flamegpu_device_function
 def helper(x: numpy.int16) -> int :
     return x**2
@@ -45,6 +44,7 @@ def pred_output_location(message_in: MessageBruteForce, message_out: MessageBrut
 
     return FLAMEGPU.ALIVE
 """
+
 
 # introspection to convert to raw string
 #tree = ast.parse(inspect.getsource(pred_output_location))

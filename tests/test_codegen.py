@@ -4,65 +4,95 @@ import sys
 import six
 import pytest
 import unittest
+import ast
+import codegen
+import astpretty
 
+
+DEBUG_AST_OUT = True
+EXCEPTION_MSG_CHECKING = True
+
+# For loops
+
+py_for_else = """\
+for x in range(10):
+    break
+else:
+    y = 2
+"""
+
+py_for_range_arg1 = """\
+for x in range(10):
+    break
+"""
+cpp_for_range_arg1 = """\
+for (int x=0;x<10;x++){
+    break;
+}
+"""
+
+py_for_range_arg2 = """\
+for x in range(2, 11):
+    break
+"""
+cpp_for_range_arg2 = """\
+for (int x=2;x<11;x++){
+    break;
+}
+"""
+
+py_for_range_arg3 = """\
+for x in range(3, 12, 4):
+    break
+"""
+cpp_for_range_arg3 = """\
+for (int x=3;x<12;x+=4){
+    break;
+}
+"""
+
+py_for_unsupported = """\
+for x in something:
+    break
+"""
+
+# While loops
+
+py_while_else = """\
+while True:
+    break
+else:
+    y = 2
+"""
+
+py_while = """\
+while True:
+    break
+"""
+cpp_while = """\
+while (true){
+    break;
+}
+"""
+
+py_try = """\
+try:
+    1 / 0
+except Exception as e:
+    pass
+"""
+
+
+######### to do ########
 code_parseable_in_all_parser_modes = """\
 (a + b + c) * (d + e + f)
 """
 
-for_else = """\
-def f():
-    for x in range(10):
-        break
-    else:
-        y = 2
-    z = 3
-"""
 
-while_else = """\
-def g():
-    while True:
-        break
-    else:
-        y = 2
-    z = 3
-"""
 
-relative_import = """\
-from . import fred
-from .. import barney
-from .australia import shrimp as prawns
-"""
-
-import_many = """\
-import fred, barney
-"""
-
-nonlocal_ex = """\
-def f():
-    x = 1
-    def g():
-        nonlocal x
-        x = 2
-        y = 7
-        def h():
-            nonlocal x, y
-"""
-
-# also acts as test for 'except ... as ...'
-raise_from = """\
-try:
-    1 / 0
-except ZeroDivisionError as e:
-    raise ArithmeticError from e
-"""
-
-async_comprehensions_and_generators = """\
+py_async_func = """\
 async def async_function():
-    my_set = {i async for i in aiter() if i % 2}
-    my_list = [i async for i in aiter() if i % 2]
-    my_dict = {i: -i async for i in aiter() if i % 2}
-    my_gen = (i ** 2 async for i in agen())
-    my_other_gen = (i - 1 async for i in agen() if i % 2)
+    pass
 """
 
 class_decorator = """\
@@ -146,246 +176,230 @@ async def f():
         suite1
 """
 
+
+
 class CodeGenTest(unittest.TestCase):
 
 
-    test_directories = [
-        os.path.join(getattr(sys, 'real_prefix', sys.prefix),
-                     'lib', 'python%s.%s' % sys.version_info[:2])]
-
-    def checkExpected(source, expected):
+    def _checkExpected(self, source, expected=None):
+        source = source.strip()
         tree = ast.parse(source)
-        # try unparse
-        code = astunparse.unparse(tree)
-        print(code)
-
+        if DEBUG_AST_OUT:
+            astpretty.pprint(tree)
+        code = codegen.codegen(tree)
+        # remove new lines
+        code = code.strip()
+        if expected:
+            expected = expected.strip()
+        else:
+            expected = source
+        assert expected == code
+        
+    def _checkException(self, source, exception_str):
+        with pytest.raises(codegen.CodeGenException) as e:
+            tree = ast.parse(source.strip())
+            # code generate
+            code = codegen.codegen(tree)
+        if EXCEPTION_MSG_CHECKING:
+            assert exception_str in str(e.value)
+        
 
     def test_del_statement(self):
-        self.check_roundtrip("del x, y, z")
+        self._checkException("del x, y, z", "Deletion not supported")
 
     def test_shifts(self):
-        self.check_roundtrip("45 << 2")
-        self.check_roundtrip("13 >> 7")
+        self._checkExpected("45 << 2", "(45 << 2);")
+        self._checkExpected("13 >> 7", "(13 >> 7);")
 
     def test_for_else(self):
-        self.check_roundtrip(for_else)
-
+        self._checkException(py_for_else, "For else not supported")
+        
+    def test_for_range(self):
+        # use of range based for loops (calling range with different number of arguments)
+        self._checkExpected(py_for_range_arg1, cpp_for_range_arg1)
+        self._checkExpected(py_for_range_arg2, cpp_for_range_arg2)
+        self._checkExpected(py_for_range_arg3, cpp_for_range_arg3)   
+        # check that non range function loops are rejected
+        self._checkException(py_for_unsupported, "Range based for loops only support")
+       
     def test_while_else(self):
-        self.check_roundtrip(while_else)
+        self._checkException(py_while_else, "While else not supported")
+        
+    def test_while(self):
+        self._checkExpected(py_while, cpp_while)
 
     def test_unary_parens(self):
-        self.check_roundtrip("(-1)**7")
-        self.check_roundtrip("(-1.)**8")
-        self.check_roundtrip("(-1j)**6")
-        self.check_roundtrip("not True or False")
-        self.check_roundtrip("True or not False")
+        self._checkExpected("(-1)**7", "pow((-1), 7);")
+        self._checkExpected("-1.**8", "(-pow(1.0, 8));")
+        self._checkExpected("not True or False", "((!true) || false);")
+        self._checkExpected("True or not False", "(true || (!false));")
 
-    @unittest.skipUnless(sys.version_info < (3, 6), "Only works for Python < 3.6")
     def test_integer_parens(self):
-        self.check_roundtrip("3 .__abs__()")
+        self._checkException("3 .__abs__()", "Unsupported") # should resolve to unsupported function call syntax
 
+    @unittest.skip
     def test_huge_float(self):
-        self.check_roundtrip("1e1000")
-        self.check_roundtrip("-1e1000")
-        self.check_roundtrip("1e1000j")
-        self.check_roundtrip("-1e1000j")
+        pass
+        #self._checkExpected("1e1000", "inf")
+        #self._checkExpected("-1e1000")
+        #self._checkExpected("1e1000j")
+        #self._checkExpected("-1e1000j")
 
-    @unittest.skipUnless(six.PY2, "Only works for Python 2")
-    def test_min_int27(self):
-        self.check_roundtrip(str(-sys.maxint-1))
-        self.check_roundtrip("-(%s)" % (sys.maxint + 1))
-
-    @unittest.skipUnless(six.PY3, "Only works for Python 3")
     def test_min_int30(self):
-        self.check_roundtrip(str(-2**31))
-        self.check_roundtrip(str(-2**63))
-
-    def test_imaginary_literals(self):
-        self.check_roundtrip("7j")
-        self.check_roundtrip("-7j")
-        self.check_roundtrip("0j")
-        self.check_roundtrip("-0j")
-        if six.PY2:
-            self.check_roundtrip("-(7j)")
-            self.check_roundtrip("-(0j)")
+        self._checkExpected(str(-2**31), "(-2147483648);")
+        self._checkExpected(str(-2**63), "(-9223372036854775808);")
 
     def test_negative_zero(self):
-        self.check_roundtrip("-0")
-        self.check_roundtrip("-(0)")
-        self.check_roundtrip("-0b0")
-        self.check_roundtrip("-(0b0)")
-        self.check_roundtrip("-0o0")
-        self.check_roundtrip("-(0o0)")
-        self.check_roundtrip("-0x0")
-        self.check_roundtrip("-(0x0)")
+        self._checkExpected("-0", "(-0);")
+        self._checkExpected("-(0)", "(-0);")
+        self._checkExpected("-0b0", "(-0);")
+        self._checkExpected("-(0b0)", "(-0);")
+        self._checkExpected("-0o0", "(-0);")
+        self._checkExpected("-(0o0)", "(-0);")
+        self._checkExpected("-0x0", "(-0);")
+        self._checkExpected("-(0x0)", "(-0);")
 
     def test_lambda_parentheses(self):
-        self.check_roundtrip("(lambda: int)()")
+        self._checkException("(lambda: int)()", "Lambda is not supported")
 
     def test_chained_comparisons(self):
-        self.check_roundtrip("1 < 4 <= 5")
-        self.check_roundtrip("a is b is c is not d")
+        self._checkExpected("1 < 4 <= 5", "1 < 4 <= 5;")
+        self._checkExpected("a is b is c is not d", "a == b == c != d;")
 
     def test_function_arguments(self):
-        self.check_roundtrip("def f(): pass")
-        self.check_roundtrip("def f(a): pass")
-        self.check_roundtrip("def f(b = 2): pass")
-        self.check_roundtrip("def f(a, b): pass")
-        self.check_roundtrip("def f(a, b = 2): pass")
-        self.check_roundtrip("def f(a = 5, b = 2): pass")
-        self.check_roundtrip("def f(*args, **kwargs): pass")
-        if six.PY3:
-            self.check_roundtrip("def f(*, a = 1, b = 2): pass")
-            self.check_roundtrip("def f(*, a = 1, b): pass")
-            self.check_roundtrip("def f(*, a, b = 2): pass")
-            self.check_roundtrip("def f(a, b = None, *, c, **kwds): pass")
-            self.check_roundtrip("def f(a=2, *args, c=5, d, **kwds): pass")
+        # only flame gpu functions or device functions are supported
+        self._checkException("def f(): pass", "Function definitions require a")
 
     def test_relative_import(self):
-        self.check_roundtrip(relative_import)
+        self._checkException("from . import fred", "Importing of modules not supported")
 
     def test_import_many(self):
-        self.check_roundtrip(import_many)
+        self._checkException("import fred, other", "Importing of modules not supported")
 
-    @unittest.skipUnless(six.PY3, "Only for Python 3")
     def test_nonlocal(self):
-        self.check_roundtrip(nonlocal_ex)
+        self._checkException("nonlocal x", "Use of 'nonlocal' not supported")
 
-    @unittest.skipUnless(six.PY3, "Only for Python 3")
-    def test_raise_from(self):
-        self.check_roundtrip(raise_from)
+    def test_exceptions(self):
+        self._checkException("raise Error", "Exception raising not supported")
+        self._checkException(py_try, "Exceptions not supported")
 
     def test_bytes(self):
-        self.check_roundtrip("b'123'")
+        self._checkException("b'123'", "Byte strings not supported")
 
-    @unittest.skipIf(sys.version_info < (3, 6), "Not supported < 3.6")
-    def test_formatted_value(self):
-        self.check_roundtrip('f"{value}"')
-        self.check_roundtrip('f"{value!s}"')
-        self.check_roundtrip('f"{value:4}"')
-        self.check_roundtrip('f"{value!s:4}"')
+    def test_strings(self):
+        self._checkException('f"{value}"', "not supported")
 
-    @unittest.skipIf(sys.version_info < (3, 6), "Not supported < 3.6")
-    def test_joined_str(self):
-        self.check_roundtrip('f"{key}={value!s}"')
-        self.check_roundtrip('f"{key}={value!r}"')
-        self.check_roundtrip('f"{key}={value!a}"')
-
-    @unittest.skipIf(sys.version_info != (3, 6, 0), "Only supported on 3.6.0")
-    def test_joined_str_361(self):
-        self.check_roundtrip('f"{key:4}={value!s}"')
-        self.check_roundtrip('f"{key:02}={value!r}"')
-        self.check_roundtrip('f"{key:6}={value!a}"')
-        self.check_roundtrip('f"{key:4}={value:#06x}"')
-        self.check_roundtrip('f"{key:02}={value:#06x}"')
-        self.check_roundtrip('f"{key:6}={value:#06x}"')
-        self.check_roundtrip('f"{key:4}={value!s:#06x}"')
-        self.check_roundtrip('f"{key:4}={value!r:#06x}"')
-        self.check_roundtrip('f"{key:4}={value!a:#06x}"')
-
-    @unittest.skipUnless(six.PY2, "Only for Python 2")
-    def test_repr(self):
-        self.check_roundtrip(a_repr)
-
-    @unittest.skipUnless(sys.version_info[:2] >= (3, 6), "Only for Python 3.6 or greater")
-    def test_complex_f_string(self):
-        self.check_roundtrip(complex_f_string)
-
-    @unittest.skipUnless(six.PY3, "Only for Python 3")
-    def test_annotations(self):
-        self.check_roundtrip("def f(a : int): pass")
-        self.check_roundtrip("def f(a: int = 5): pass")
-        self.check_roundtrip("def f(*args: [int]): pass")
-        self.check_roundtrip("def f(**kwargs: dict): pass")
-        self.check_roundtrip("def f() -> None: pass")
-
-    @unittest.skipIf(sys.version_info < (2, 7), "Not supported < 2.7")
     def test_set_literal(self):
-        self.check_roundtrip("{'a', 'b', 'c'}")
+        self._checkException("{'a', 'b', 'c'}", "Sets not supported")
 
-    @unittest.skipIf(sys.version_info < (2, 7), "Not supported < 2.7")
-    def test_set_comprehension(self):
-        self.check_roundtrip("{x for x in range(5)}")
+    def test_comprehension(self):
+        self._checkException("{x for x in range(5)}", "Set comprehension not supported")
+        self._checkException("{x: x*x for x in range(10)}", "Dictionary comprehension not supported")
 
-    @unittest.skipIf(sys.version_info < (2, 7), "Not supported < 2.7")
-    def test_dict_comprehension(self):
-        self.check_roundtrip("{x: x*x for x in range(10)}")
-
-    @unittest.skipIf(sys.version_info < (3, 6), "Not supported < 3.6")
     def test_dict_with_unpacking(self):
-        self.check_roundtrip("{**x}")
-        self.check_roundtrip("{a: b, **x}")
+        self._checkException("{**x}", "Dictionaries not supported")
+        self._checkException("{a: b, **x}", "Dictionaries not supported")
 
-    @unittest.skipIf(sys.version_info < (3, 6), "Not supported < 3.6")
     def test_async_comp_and_gen_in_async_function(self):
-        self.check_roundtrip(async_comprehensions_and_generators)
+        self._checkException(py_async_func, "Async functions not supported")
 
-    @unittest.skipIf(sys.version_info < (3, 7), "Not supported < 3.7")
     def test_async_comprehension(self):
-        self.check_roundtrip("{i async for i in aiter() if i % 2}")
-        self.check_roundtrip("[i async for i in aiter() if i % 2]")
-        self.check_roundtrip("{i: -i async for i in aiter() if i % 2}")
+        self._checkException("{i async for i in aiter() if i % 2}", "Set comprehension not supported")
+        self._checkException("[i async for i in aiter() if i % 2]", "List comprehension not supported")
+        self._checkException("{i: -i async for i in aiter() if i % 2}", "Dictionary comprehension not supported")
 
-    @unittest.skipIf(sys.version_info < (3, 7), "Not supported < 3.7")
+    @unittest.skip
     def test_async_generator_expression(self):
-        self.check_roundtrip("(i ** 2 async for i in agen())")
-        self.check_roundtrip("(i - 1 async for i in agen() if i % 2)")
+        self._checkExpected("(i ** 2 async for i in agen())")
+        self._checkExpected("(i - 1 async for i in agen() if i % 2)")
 
+    @unittest.skip
     def test_class_decorators(self):
-        self.check_roundtrip(class_decorator)
+        self._checkExpected(class_decorator)
 
-    @unittest.skipUnless(six.PY3, "Only for Python 3")
+    @unittest.skip
     def test_class_definition(self):
-        self.check_roundtrip("class A(metaclass=type, *[], **{}): pass")
+        self._checkExpected("class A(metaclass=type, *[], **{}): pass")
 
+    @unittest.skip
     def test_elifs(self):
-        self.check_roundtrip(elif1)
-        self.check_roundtrip(elif2)
+        self._checkExpected(elif1)
+        self._checkExpected(elif2)
 
+    @unittest.skip
     def test_try_except_finally(self):
-        self.check_roundtrip(try_except_finally)
+        self._checkExpected(try_except_finally)
 
-    @unittest.skipUnless(six.PY3, "Only for Python 3")
+    @unittest.skip
     def test_starred_assignment(self):
-        self.check_roundtrip("a, *b, c = seq")
-        self.check_roundtrip("a, (*b, c) = seq")
-        self.check_roundtrip("a, *b[0], c = seq")
-        self.check_roundtrip("a, *(b, c) = seq")
+        self._checkExpected("a, *b, c = seq")
+        self._checkExpected("a, (*b, c) = seq")
+        self._checkExpected("a, *b[0], c = seq")
+        self._checkExpected("a, *(b, c) = seq")
 
-    @unittest.skipIf(sys.version_info < (3, 6), "Not supported < 3.6")
+    @unittest.skip
     def test_variable_annotation(self):
-        self.check_roundtrip("a: int")
-        self.check_roundtrip("a: int = 0")
-        self.check_roundtrip("a: int = None")
-        self.check_roundtrip("some_list: List[int]")
-        self.check_roundtrip("some_list: List[int] = []")
-        self.check_roundtrip("t: Tuple[int, ...] = (1, 2, 3)")
-        self.check_roundtrip("(a): int")
-        self.check_roundtrip("(a): int = 0")
-        self.check_roundtrip("(a): int = None")
+        self._checkExpected("a: int")
+        self._checkExpected("a: int = 0")
+        self._checkExpected("a: int = None")
+        self._checkExpected("some_list: List[int]")
+        self._checkExpected("some_list: List[int] = []")
+        self._checkExpected("t: Tuple[int, ...] = (1, 2, 3)")
+        self._checkExpected("(a): int")
+        self._checkExpected("(a): int = 0")
+        self._checkExpected("(a): int = None")
 
+    @unittest.skip
     def test_with_simple(self):
-        self.check_roundtrip(with_simple)
+        self._checkExpected(with_simple)
 
+    @unittest.skip
     def test_with_as(self):
-        self.check_roundtrip(with_as)
+        self._checkExpected(with_as)
 
-    @unittest.skipIf(sys.version_info < (2, 7), "Not supported < 2.7")
+    @unittest.skip
     def test_with_two_items(self):
-        self.check_roundtrip(with_two_items)
+        self._checkExpected(with_two_items)
 
-    @unittest.skipIf(sys.version_info < (3, 5), "Not supported < 3.5")
+    @unittest.skip
     def test_async_function_def(self):
-        self.check_roundtrip(async_function_def)
+        self._checkExpected(async_function_def)
 
-    @unittest.skipIf(sys.version_info < (3, 5), "Not supported < 3.5")
+    @unittest.skip
     def test_async_for(self):
-        self.check_roundtrip(async_for)
+        self._checkExpected(async_for)
 
-    @unittest.skipIf(sys.version_info < (3, 5), "Not supported < 3.5")
+    @unittest.skip
     def test_async_with(self):
-        self.check_roundtrip(async_with)
+        self._checkExpected(async_with)
 
-    @unittest.skipIf(sys.version_info < (3, 5), "Not supported < 3.5")
+    @unittest.skip
     def test_async_with_as(self):
-        self.check_roundtrip(async_with_as)
+        self._checkExpected(async_with_as)
+
+
+# FLAME GPU functionaility
+
+    @unittest.skip
+    def test_function_arguments(self):
+        self._checkExpected("def f(): pass", "")
+        self._checkExpected("def f(a): pass")
+        self._checkExpected("def f(b = 2): pass")
+        self._checkExpected("def f(a, b): pass")
+        self._checkExpected("def f(a, b = 2): pass")
+        self._checkExpected("def f(a = 5, b = 2): pass")
+        self._checkExpected("def f(*args, **kwargs): pass")
+        if six.PY3:
+            self._checkExpected("def f(*, a = 1, b = 2): pass")
+            self._checkExpected("def f(*, a = 1, b): pass")
+            self._checkExpected("def f(*, a, b = 2): pass")
+            self._checkExpected("def f(a, b = None, *, c, **kwds): pass")
+            self._checkExpected("def f(a=2, *args, c=5, d, **kwds): pass")
+            
+    @unittest.skip
+    def test_annotations(self):
+        self._checkExpected("def f(a : int): pass")
+        self._checkExpected("def f(a: int = 5): pass")
+        self._checkExpected("def f(*args: [int]): pass")
+        self._checkExpected("def f(**kwargs: dict): pass")
+        self._checkExpected("def f() -> None: pass")
