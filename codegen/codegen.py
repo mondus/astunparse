@@ -44,8 +44,8 @@ class CodeGenerator:
                   }
     
     # support for most numpy types except complex numbers and float>64bit
-    numpytypes = {"byte": "signed char",
-                  "byte": "unsigned char",
+    numpytypes = {"byte": "char",
+                  "ubyte": "unsigned char",
                   "short": "short",
                   "ushort": "unsigned short",
                   "intc": "int",
@@ -86,6 +86,7 @@ class CodeGenerator:
     fgpu_agent_out_msg_funcs = ["getID"]
     fgpu_env_funcs = ["containsProperty"] # TODO: Get macro property
     fgpu_rand_funcs = []
+    fgpu_message_types = ["MessageNone", "MessageBruteForce"] #TODO complete
     
     _fgpu_types = {"Float": "float",
                   "Double": "double",
@@ -112,8 +113,10 @@ class CodeGenerator:
         self._indent = 0
         # dict of locals used to determine if variable already exists in assignments
         self._locals = ["FLAMEGPU"]
-        self._device_functions = [] # not actually checked any function call is allowed for now
-        self._message_iterator_var = None;
+        self._device_functions = []
+        self._message_iterator_var = None           # default
+        self._input_message_var = 'message_in'      # default
+        self._output_message_var = 'message_out'    # default
         self.dispatch(tree)
         print("", file=self.f)
         self.f.flush()
@@ -205,11 +208,10 @@ class CodeGenerator:
         """
         if len(tree.args) != 2:
             self.RaiseError("Expected two FLAME GPU function arguments (input message and output message)")
-        MessageTypes = ["MessageNone", "MessageBruteForce"]
         # input message
         if not tree.args[0].annotation:
             self.RaiseError(tree.args[0], "Message input requires a supported type annotation")
-        if tree.args[0].annotation.id not in MessageTypes:
+        if tree.args[0].annotation.id not in self.fgpu_message_types:
             self.RaiseError(tree.args[0], "Message input type annotation not a supported message type")
         self._input_message_var = tree.args[0].arg  # store the message input variable name
         self.dispatch(tree.args[0].annotation)
@@ -616,12 +618,12 @@ class CodeGenerator:
         """
         # if message loop then process differently
         if isinstance(t.iter, ast.Name):
-            if t.iter.id == "message_in":
+            if t.iter.id == self._input_message_var:
                 self.dispatchMessageLoop(t)
             else:
                 self.RaiseError(t, "Range based for loops only support message iteration using 'message_in' iterator")
         # do not support for else
-        if t.orelse:
+        elif t.orelse:
             self.RaiseError(t, "For else not supported")
         # allow calls but only to range function
         elif isinstance(t.iter, ast.Call):
@@ -777,7 +779,7 @@ class CodeGenerator:
         elif value is Ellipsis: # instead of `...` for Py2 compatibility
             self.RaiseError(t, "Ellipsis not supported")
         elif isinstance(value, str): 
-            self.write(repr(value))
+            self.write(f'"{value}"')
         elif isinstance(value, (bytes, bytearray)):  # reject bytes strings e.g. b'123' 
             self.RaiseError(t, "Byte strings not supported")
         elif isinstance(value, bool):

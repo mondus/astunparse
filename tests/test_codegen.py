@@ -12,7 +12,7 @@ import astpretty
 DEBUG_OUT = True
 EXCEPTION_MSG_CHECKING = True
 
-# For loops
+# Standard python syntax
 
 py_for_else = """\
 for x in range(10):
@@ -55,8 +55,6 @@ py_for_unsupported = """\
 for x in something:
     break
 """
-
-# While loops
 
 py_while_else = """\
 while True:
@@ -141,16 +139,12 @@ with f() as x:
 """
 
 
-a_repr = """\
-`{}`
-"""
-
-async_function_def = """\
+py_async_function_def = """\
 async def f():
     suite1
 """
 
-async_for = """\
+py_async_for = """\
 async for _ in reader:
     suite1
 """
@@ -165,7 +159,20 @@ async with g() as x:
     suite1
 """
 
+# FGPU functionality
 
+py_fgpu_for_msg_input = """\
+for msg in message_in: 
+    f = msg.getVariableFloat("f")
+    fa4 = msg.getVariableFloatArray4("fa4")
+"""
+
+cpp_fgpu_for_msg_input = """\
+for (const auto& msg : FLAMEGPU->message_in){
+    auto f = msg.getVariable<float>("f");
+    auto fa4 = msg.getVariable<float, 4>("fa4");
+}
+"""
 
 class CodeGenTest(unittest.TestCase):
 
@@ -330,15 +337,55 @@ class CodeGenTest(unittest.TestCase):
         self._checkException(py_async_with_as, "Async with not supported")
 
     def test_async_function_def(self):
-        self._checkException(async_function_def, "Async functions not supported")
+        self._checkException(py_async_function_def, "Async functions not supported")
 
     def test_async_for(self):
-        self._checkException(async_for, "Async for not supported")
+        self._checkException(py_async_for, "Async for not supported")
 
 
 
-# FLAME GPU functionaility
+# FLAME GPU specific functionality
 
+    def test_fgpu_supported_types(self):
+        self._checkExpected("a: numpy.byte", "char a;")
+        self._checkExpected("a: numpy.ubyte", "unsigned char a;"),
+        self._checkExpected("a: numpy.short", "short a;")
+        self._checkExpected("a: numpy.ushort", "unsigned short a;")
+        self._checkExpected("a: numpy.intc", "int a;")
+        self._checkExpected("a: numpy.uintc", "unsigned int a;")
+        self._checkExpected("a: numpy.uint", "unisgned int a;")
+        self._checkExpected("a: numpy.longlong", "long long a;")
+        self._checkExpected("a: numpy.ulonglong", "unsigned long long a;")
+        self._checkExpected("a: numpy.half", "half a;")
+        self._checkExpected("a: numpy.single", "float a;")
+        self._checkExpected("a: numpy.double", "double a;")
+        self._checkExpected("a: numpy.longdouble", "long double a;")
+        self._checkExpected("a: numpy.bool_", "bool a;")
+        self._checkExpected("a: numpy.bool8", "bool a;")
+        # sized aliases
+        self._checkExpected("a: numpy.int_", "long a;")
+        self._checkExpected("a: numpy.int8", "int8_t a;"),
+        self._checkExpected("a: numpy.int16", "int16_t a;")
+        self._checkExpected("a: numpy.int32", "int32_t a;")
+        self._checkExpected("a: numpy.int64", "int64_t a;")
+        self._checkExpected("a: numpy.intp", "intptr_t a;")
+        self._checkExpected("a: numpy.uint_", "long a;")
+        self._checkExpected("a: numpy.uint8", "uint8_t a;")
+        self._checkExpected("a: numpy.uint16", "uint16_t a;")
+        self._checkExpected("a: numpy.uint32", "uint32_t a;")
+        self._checkExpected("a: numpy.uint64", "uint64_t a;")
+        self._checkExpected("a: numpy.uintp", "uintptr_t a;")
+        self._checkExpected("a: numpy.float_", "float a;")
+        self._checkExpected("a: numpy.float16", "half a;")
+        self._checkExpected("a: numpy.float32", "float a;")
+        self._checkExpected("a: numpy.float64", "double a;")
+        # check unsupported
+        self._checkException("a: numpy.unsupported", "Not a supported numpy type")
+        
+        
+    def test_msg_input(self):
+        self._checkExpected(py_fgpu_for_msg_input, cpp_fgpu_for_msg_input)
+    
     @unittest.skip
     def test_function_arguments(self):
         self._checkExpected("def f(): pass", "")
@@ -363,7 +410,3 @@ class CodeGenTest(unittest.TestCase):
         self._checkExpected("def f(**kwargs: dict): pass")
         self._checkExpected("def f() -> None: pass")
     
-    @unittest.skip
-    def test_variable_types(self):
-        self._checkExpected("a: int", "int a;")
-        # todo all the numpy types
