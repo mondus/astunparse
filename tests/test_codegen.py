@@ -9,7 +9,7 @@ import codegen
 import astpretty
 
 
-DEBUG_AST_OUT = True
+DEBUG_OUT = True
 EXCEPTION_MSG_CHECKING = True
 
 # For loops
@@ -82,76 +82,68 @@ except Exception as e:
     pass
 """
 
-
-######### to do ########
-code_parseable_in_all_parser_modes = """\
-(a + b + c) * (d + e + f)
-"""
-
-
-
 py_async_func = """\
 async def async_function():
     pass
 """
 
-class_decorator = """\
+py_class_decorator = """\
 @f1(arg)
 @f2
 class Foo: pass
 """
 
-elif1 = """\
+py_elif1 = """\
 if cond1:
-    suite1
+    break
 elif cond2:
-    suite2
+    break
 else:
-    suite3
+    break
 """
 
-elif2 = """\
+cpp_elif1 = """\
+if (cond1){
+    break;
+}
+else if (cond2){
+    break;
+}
+else{
+    break;
+}
+"""
+
+py_elif2 = """\
 if cond1:
-    suite1
+    break
 elif cond2:
-    suite2
+    break
 """
 
-try_except_finally = """\
-try:
-    suite1
-except ex1:
-    suite2
-except ex2:
-    suite3
-else:
-    suite4
-finally:
-    suite5
+cpp_elif2 = """\
+if (cond1){
+    break;
+}
+else if (cond2){
+    break;
+}
 """
 
-with_simple = """\
+py_with_simple = """\
 with f():
     suite1
 """
 
-with_as = """\
+py_with_as = """\
 with f() as x:
     suite1
 """
 
-with_two_items = """\
-with f() as x, g() as y:
-    suite1
-"""
 
 a_repr = """\
 `{}`
 """
-
-complex_f_string = '''\
-f\'\'\'-{f"""*{f"+{f'.{x}.'}+"}*"""}-\'\'\'
-'''
 
 async_function_def = """\
 async def f():
@@ -159,21 +151,18 @@ async def f():
 """
 
 async_for = """\
-async def f():
-    async for _ in reader:
-        suite1
+async for _ in reader:
+    suite1
 """
 
-async_with = """\
-async def f():
-    async with g():
-        suite1
+py_async_with = """\
+async with g():
+    suite1
 """
 
-async_with_as = """\
-async def f():
-    async with g() as x:
-        suite1
+py_async_with_as = """\
+async with g() as x:
+    suite1
 """
 
 
@@ -184,7 +173,7 @@ class CodeGenTest(unittest.TestCase):
     def _checkExpected(self, source, expected=None):
         source = source.strip()
         tree = ast.parse(source)
-        if DEBUG_AST_OUT:
+        if DEBUG_OUT:
             astpretty.pprint(tree)
         code = codegen.codegen(tree)
         # remove new lines
@@ -193,6 +182,9 @@ class CodeGenTest(unittest.TestCase):
             expected = expected.strip()
         else:
             expected = source
+        if DEBUG_OUT:
+            print(f"Expected: {expected}")
+            print(f"Output  : {code}")
         assert expected == code
         
     def _checkException(self, source, exception_str):
@@ -237,10 +229,8 @@ class CodeGenTest(unittest.TestCase):
     def test_integer_parens(self):
         self._checkException("3 .__abs__()", "Unsupported") # should resolve to unsupported function call syntax
 
-    @unittest.skip
     def test_huge_float(self):
-        pass
-        #self._checkExpected("1e1000", "inf")
+        self._checkExpected("1e1000", "inf;")
         #self._checkExpected("-1e1000")
         #self._checkExpected("1e1000j")
         #self._checkExpected("-1e1000j")
@@ -308,74 +298,43 @@ class CodeGenTest(unittest.TestCase):
         self._checkException("[i async for i in aiter() if i % 2]", "List comprehension not supported")
         self._checkException("{i: -i async for i in aiter() if i % 2}", "Dictionary comprehension not supported")
 
-    @unittest.skip
     def test_async_generator_expression(self):
-        self._checkExpected("(i ** 2 async for i in agen())")
-        self._checkExpected("(i - 1 async for i in agen() if i % 2)")
+        self._checkException("(i ** 2 async for i in agen())", "Generator expressions not supported")
+        self._checkException("(i - 1 async for i in agen() if i % 2)", "Generator expressions not supported")
 
-    @unittest.skip
-    def test_class_decorators(self):
-        self._checkExpected(class_decorator)
+    def test_class(self):
+        self._checkException("class Foo: pass", "Class definitions not supported")
+        self._checkException(py_class_decorator, "Class definitions not supported")
 
-    @unittest.skip
-    def test_class_definition(self):
-        self._checkExpected("class A(metaclass=type, *[], **{}): pass")
 
-    @unittest.skip
     def test_elifs(self):
-        self._checkExpected(elif1)
-        self._checkExpected(elif2)
+        self._checkExpected(py_elif1, cpp_elif1)
+        self._checkExpected(py_elif2, cpp_elif2)
 
-    @unittest.skip
-    def test_try_except_finally(self):
-        self._checkExpected(try_except_finally)
 
-    @unittest.skip
     def test_starred_assignment(self):
-        self._checkExpected("a, *b, c = seq")
-        self._checkExpected("a, (*b, c) = seq")
-        self._checkExpected("a, *b[0], c = seq")
-        self._checkExpected("a, *(b, c) = seq")
+        self._checkException("a, *b = seq", "Assignment to complex expressions not supported")
 
-    @unittest.skip
     def test_variable_annotation(self):
-        self._checkExpected("a: int")
-        self._checkExpected("a: int = 0")
-        self._checkExpected("a: int = None")
-        self._checkExpected("some_list: List[int]")
-        self._checkExpected("some_list: List[int] = []")
-        self._checkExpected("t: Tuple[int, ...] = (1, 2, 3)")
-        self._checkExpected("(a): int")
-        self._checkExpected("(a): int = 0")
-        self._checkExpected("(a): int = None")
+        self._checkExpected("a: int", "int a;")
+        self._checkExpected("a: int = 0", "int a = 0;")
+        self._checkExpected("a: int = None", "int a = 0;")
+        self._checkException("some_list: List[int]", "Not a supported type")
+        self._checkException("some_list: List[int] = []", "Not a supported type")
+        self._checkException("t: Tuple[int, ...] = (1, 2, 3)", "Not a supported type")
 
-    @unittest.skip
-    def test_with_simple(self):
-        self._checkExpected(with_simple)
+    def test_with(self):
+        self._checkException(py_with_simple, "With not supported")
+        self._checkException(py_with_as, "With not supported")
+        self._checkException(py_async_with, "Async with not supported")
+        self._checkException(py_async_with_as, "Async with not supported")
 
-    @unittest.skip
-    def test_with_as(self):
-        self._checkExpected(with_as)
-
-    @unittest.skip
-    def test_with_two_items(self):
-        self._checkExpected(with_two_items)
-
-    @unittest.skip
     def test_async_function_def(self):
-        self._checkExpected(async_function_def)
+        self._checkException(async_function_def, "Async functions not supported")
 
-    @unittest.skip
     def test_async_for(self):
-        self._checkExpected(async_for)
+        self._checkException(async_for, "Async for not supported")
 
-    @unittest.skip
-    def test_async_with(self):
-        self._checkExpected(async_with)
-
-    @unittest.skip
-    def test_async_with_as(self):
-        self._checkExpected(async_with_as)
 
 
 # FLAME GPU functionaility
@@ -403,3 +362,8 @@ class CodeGenTest(unittest.TestCase):
         self._checkExpected("def f(*args: [int]): pass")
         self._checkExpected("def f(**kwargs: dict): pass")
         self._checkExpected("def f() -> None: pass")
+    
+    @unittest.skip
+    def test_variable_types(self):
+        self._checkExpected("a: int", "int a;")
+        # todo all the numpy types

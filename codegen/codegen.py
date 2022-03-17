@@ -231,17 +231,18 @@ class CodeGenerator:
         """
         if isinstance(tree, ast.Name):
             if tree.id not in self.basic_arg_types:
-                self.RaiseError(arg, "Not a supported type")
+                self.RaiseError(tree, "Not a supported type")
             self.write(tree.id)
         elif isinstance(tree, ast.Attribute):
             if not isinstance(tree.value, ast.Name) :
-                self.RaiseError(arg, "Not a supported type")
+                self.RaiseError(tree, "Not a supported type")
             if not (tree.value.id == "numpy" or tree.value.id == "np"):
-                self.RaiseError(arg, "Not a supported type")
+                self.RaiseError(tree, "Not a supported type")
             if tree.attr not in self.numpytypes:
-                self.RaiseError(arg, "Not a supported numpy type")
+                self.RaiseError(tree, "Not a supported numpy type")
             self.write(self.numpytypes[tree.attr])
-
+        else:
+            self.RaiseError(tree, "Not a supported type")
     
     def dispatchFGPUDeviceFunctionArgs(self, tree):
         """
@@ -485,7 +486,16 @@ class CodeGenerator:
         self.write(";")
 
     def _AnnAssign(self, t):
-        self.RaiseError(t, "Annotated Assignment not supported")
+        if not isinstance(t.target, ast.Name):
+            self.RaiseError(t, "Augmented assignment to complex expressions not supported")
+        self.fill()
+        self.dispatchType(t.annotation)
+        self.write(" ")
+        self.dispatch(t.target)
+        if t.value:
+            self.write(" = ")
+            self.dispatch(t.value)
+        self.write(";")
 
     def _Return(self, t):
         """
@@ -710,10 +720,10 @@ class CodeGenerator:
             self.RaiseError(t, "While else not supported")
 
     def _With(self, t):
-        self.RaiseError(t, "With for not supported")
+        self.RaiseError(t, "With not supported")
 
     def _AsyncWith(self, t):
-        self.RaiseError(t, "Asynchronous with for not supported")
+        self.RaiseError(t, "Async with not supported")
 
     # expr
     def _Bytes(self, t):
@@ -755,6 +765,7 @@ class CodeGenerator:
     def _Constant(self, t):
         """
         Restrict most types of constant except for numeric types and constant strings
+        Picks up some obvious conversions such as None and Bools
         """
         value = t.value
         if isinstance(value, tuple):
@@ -774,6 +785,8 @@ class CodeGenerator:
                 self.write("true")
             else:
                 self.write("false")
+        elif value == None:
+            self.write(0)
         else:
             self.write(repr(value))
 
