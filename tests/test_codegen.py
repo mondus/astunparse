@@ -300,19 +300,53 @@ FLAMEGPU->message_out.setVariable<int>("i", i);
 
 py_fgpu_agent_func = """\
 @flamegpu_agent_function
-def func(message_in: MessageBruteForce, message_out: MessageBruteForce):
+def func(message_in: MessageNone, message_out: MessageBruteForce):
     pass
 """
 cpp_fgpu_agent_func = """\
+FLAMEGPU_AGENT_FUNCTION(func, MessageNone, MessageBruteForce){
+    ;
+}
+"""
+
+py_fgpu_agent_func_no_input_msg_type = """\
 @flamegpu_agent_function
-FLAMEGPU_AGENT_FUNCTION(pred_output_location, MessageBruteForce, MessageBruteForce){
+def func(message_in, message_out: MessageBruteForce):
+    pass
+"""
+
+py_fgpu_agent_func_no_output_msg_type = """\
+@flamegpu_agent_function
+def func(message_in: MessageNone, message_out):
+    pass
+"""
+
+py_fgpu_agent_func_extra_args = """\
+@flamegpu_agent_function
+def func(message_in: MessageBruteForce, message_out: MessageBruteForce, other):
+    pass
+"""
+
+py_fgpu_agent_func_extra_args = """\
+@flamegpu_agent_function
+def func(message_in: MessageBruteForce, message_out: MessageBruteForce, other):
+    pass
+"""
+
+py_fgpu_agent_func_return_type = """\
+@flamegpu_agent_function
+def func(message_in: MessageNone, message_out: MessageBruteForce) -> int :
+    pass
+"""
+cpp_fgpu_agent_func_return_type = """\
+FLAMEGPU_AGENT_FUNCTION(func, MessageNone, MessageBruteForce){
     ;
 }
 """
 class CodeGenTest(unittest.TestCase):
 
 
-    def _checkExpected(self, source, expected=None):
+    def _checkExpected(self, source, expected):
         source = source.strip()
         tree = ast.parse(source)
         if DEBUG_OUT:
@@ -320,14 +354,16 @@ class CodeGenTest(unittest.TestCase):
         code = codegen.codegen(tree)
         # remove new lines
         code = code.strip()
-        if expected:
-            expected = expected.strip()
-        else:
-            expected = source
+        expected = expected.strip()
         if DEBUG_OUT:
             print(f"Expected: {expected}")
             print(f"Output  : {code}")
         assert expected == code
+            
+    def _checkWarning(self, source, expected, warning_str):
+        with pytest.warns() as record:
+            self._checkExpected(source, expected)
+        assert warning_str in str(record[0].message)
         
     def _checkException(self, source, exception_str):
         with pytest.raises(codegen.CodeGenException) as e:
@@ -336,6 +372,7 @@ class CodeGenTest(unittest.TestCase):
             code = codegen.codegen(tree)
         if EXCEPTION_MSG_CHECKING:
             assert exception_str in str(e.value)
+           
         
 
     def test_del_statement(self):
@@ -576,7 +613,42 @@ class CodeGenTest(unittest.TestCase):
     
     def test_fgpu_agent_func(self):
         self._checkExpected(py_fgpu_agent_func, cpp_fgpu_agent_func)
-    
+        
+    def test_fgpu_agent_func_input_types(self):
+        """ Try all the message input types by using a string replacement """
+        # try all correct types
+        for msg_type in codegen.CodeGenerator.fgpu_message_types:
+            py_func = py_fgpu_agent_func.replace("MessageNone", msg_type)
+            cpp_output = cpp_fgpu_agent_func.replace("MessageNone", msg_type)
+            self._checkExpected(py_func, cpp_output)
+        # try an incorrect type
+        py_func = py_fgpu_agent_func.replace("MessageNone", "UnsupportedMessageType")
+        self._checkException(py_func, "Message input type annotation not a supported message type")
+        
+    def test_fgpu_agent_func_output_types(self):
+        """ Try all the message output types by using a string replacement """
+        # try all correct types
+        for msg_type in codegen.CodeGenerator.fgpu_message_types:
+            py_func = py_fgpu_agent_func.replace("MessageBruteForce", msg_type)
+            cpp_output = cpp_fgpu_agent_func.replace("MessageBruteForce", msg_type)
+            self._checkExpected(py_func, cpp_output)
+        # try an incorrect type
+        py_func = py_fgpu_agent_func.replace("MessageBruteForce", "UnsupportedMessageType")
+        self._checkException(py_func, "Message output type annotation not a supported message type")
+        
+    def test_fgpu_agent_func_incorrect_args(self):
+        # Missing input message type
+        self._checkException(py_fgpu_agent_func_no_input_msg_type, "Message input requires a supported type annotation")
+        # Missing output message type
+        self._checkException(py_fgpu_agent_func_no_output_msg_type, "Message output requires a supported type annotation")
+        # Extra argument
+        self._checkException(py_fgpu_agent_func_extra_args, "Expected two FLAME GPU function arguments")
+        
+    def test_fgpu_agent_func_return_type(self):
+        """ Return type on an agent function raises a warning not error """
+        self._checkWarning(py_fgpu_agent_func_return_type, cpp_fgpu_agent_func_return_type, "Function definition return type not supported")
+            
+        
     # device functions, arg types and calling
     
     def test_fgpu_device_func(self):

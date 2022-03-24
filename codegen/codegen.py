@@ -86,7 +86,7 @@ class CodeGenerator:
     fgpu_agent_out_msg_funcs = ["getID"]
     fgpu_env_funcs = ["containsProperty"] # TODO: Get macro property
     fgpu_rand_funcs = []
-    fgpu_message_types = ["MessageNone", "MessageBruteForce"] #TODO complete
+    fgpu_message_types = ["MessageNone", "MessageBruteForce", "MessageBucket", "MessageSpatial2D", "MessageSpatial3D", "MessageArray", "MessageArray2D", "MessageArray3D"]
     
     _fgpu_types = {"Float": "float",
                   "Double": "double",
@@ -206,23 +206,23 @@ class CodeGenerator:
         Handles arguments for a FLAME GPU function. Arguments must have syntax of `message_in: MessageInType, message_out: MessageOutType`
         Type hinting is required to translate a type into a FLAME GPU Message type implementation
         """
-        if len(tree.args) != 2:
-            self.RaiseError("Expected two FLAME GPU function arguments (input message and output message)")
+        if len(tree.args.args) != 2:
+            self.RaiseError(tree, "Expected two FLAME GPU function arguments (input message and output message)")
         # input message
-        if not tree.args[0].annotation:
-            self.RaiseError(tree.args[0], "Message input requires a supported type annotation")
-        if tree.args[0].annotation.id not in self.fgpu_message_types:
-            self.RaiseError(tree.args[0], "Message input type annotation not a supported message type")
-        self._input_message_var = tree.args[0].arg  # store the message input variable name
-        self.dispatch(tree.args[0].annotation)
+        if not tree.args.args[0].annotation:
+            self.RaiseError(tree.args.args[0], "Message input requires a supported type annotation")
+        if tree.args.args[0].annotation.id not in self.fgpu_message_types:
+            self.RaiseError(tree.args.args[0], "Message input type annotation not a supported message type")
+        self._input_message_var = tree.args.args[0].arg  # store the message input variable name
+        self.dispatch(tree.args.args[0].annotation)
         self.write(", ")
         # output message
-        if not tree.args[1].annotation:
-            self.RaiseError(tree.args[1], "Message output requires a supported type annotation")
-        if tree.args[1].annotation.id not in MessageTypes:
-            self.RaiseError(tree.args[1], "Message output type annotation not a supported message type")
-        self._output_message_var = tree.args[1].arg  # store the message output variable name
-        self.dispatch(tree.args[1].annotation)
+        if not tree.args.args[1].annotation:
+            self.RaiseError(tree.args.args[1], "Message output requires a supported type annotation")
+        if tree.args.args[1].annotation.id not in self.fgpu_message_types:
+            self.RaiseError(tree.args.args[1], "Message output type annotation not a supported message type")
+        self._output_message_var = tree.args.args[1].arg  # store the message output variable name
+        self.dispatch(tree.args.args[1].annotation)
     
     def dispatchType(self, tree):
         """
@@ -253,7 +253,7 @@ class CodeGenerator:
         # input message
         first = True
         annotation = None
-        for arg in tree.args:
+        for arg in tree.args.args:
             # ensure that there is a type annotation
             if not arg.annotation:
                 self.RaiseError(arg, "Device function argument requires type annotation")
@@ -510,7 +510,7 @@ class CodeGenerator:
         self.write(";")
 
     def _Pass(self, t):
-        self.fill("pass;")
+        self.fill(";")
 
     def _Break(self, t):
         self.fill("break;")
@@ -587,7 +587,7 @@ class CodeGenerator:
             if getattr(t, "returns", False):
                 self.RaiseWarning(t, "Function definition return type not supported on 'flamegpu_agent_function'")
             self.fill(f"FLAMEGPU_AGENT_FUNCTION({t.name}, ")
-            self.dispatchFGPUFunctionArgs(t.args)
+            self.dispatchFGPUFunctionArgs(t)
             self.write(")")
         # FLAMEGPU_DEVICE_FUNCTION
         elif t.decorator_list[0].id == 'flamegpu_device_function' :
@@ -597,7 +597,7 @@ class CodeGenerator:
             else:
                 self.write("void")
             self.write(f" {t.name}(")
-            self.dispatchFGPUDeviceFunctionArgs(t.args)
+            self.dispatchFGPUDeviceFunctionArgs(t)
             self.write(")")
             # add to list of defined functions that can be called
             self._device_functions.append(t.name)
