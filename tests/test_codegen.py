@@ -653,6 +653,8 @@ class CodeGenTest(unittest.TestCase):
     
     def test_fgpu_device_func(self):
         pass
+        
+    # function calls star args, kwargs, keyword args
     
     
     @unittest.skip
